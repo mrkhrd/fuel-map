@@ -77,6 +77,9 @@
   .pay-badge::before { display: none; } /* no tooltip arrow */
   .pay-badge.fresh { background: #e3f4e7; border-color: #b6dfc0; color: #1d6b31; }
   .pay-badge.stale { background: #f1f2f4; color: #8a8f96; }
+  .pay-badge.two { border-radius: 9px; }
+  .pay-badge .pay-sber { font-size: 9.5px; font-weight: 700; color: #1d9440; line-height: 1.2; }
+  .pay-badge.stale .pay-sber { color: #8a8f96; }
 
   .leaflet-control-attribution { font-size: 9px; opacity: .6; }
 </style>
@@ -174,18 +177,36 @@ async function loadStations() {
   const b = map.getBounds().pad(0.15);
   const url = `/api/v1/stations?minLat=${b.getSouth()}&maxLat=${b.getNorth()}` +
               `&minLon=${b.getWest()}&maxLon=${b.getEast()}`;
+  const sberUrl = `/sber/api/stations?bbox=${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
   const seq = ++fetchSeq;
   try {
-    const resp = await fetch(url);
-    const data = await resp.json();
+    const [data, sber] = await Promise.all([
+      fetch(url).then(r => r.json()),
+      fetch(sberUrl).then(r => r.json()).catch(() => null), // sber is best-effort
+    ]);
     if (seq !== fetchSeq || data.status !== "ok") return;
     stations = new Map(data.payload.map(s => [s.id, s]));
     for (const s of data.payload)
       Object.keys(s.statusByFuelType || {}).forEach(f => knownFuels.add(f));
+    attachSberPayments((sber && sber.stations) || []);
     renderFuelFilters();
     renderMarkers();
   } catch (e) {
     console.error("load failed", e);
+  }
+}
+
+// tbank is the primary source; sber only contributes its last payment time,
+// matched to the nearest tbank station within 150 m
+function attachSberPayments(sberStations) {
+  const src = sberStations.filter(x => x.lastPaymentAt && x.location);
+  for (const s of stations.values()) {
+    let best = null, bestD = 0.15; // km
+    for (const x of src) {
+      const d = haversine(s, x.location);
+      if (d < bestD) { bestD = d; best = x; }
+    }
+    if (best) s.sberPayAt = best.lastPaymentAt;
   }
 }
 
@@ -240,7 +261,8 @@ function popupHtml(s) {
   return `<div class="pp-name">${esc(s.name)}</div>` +
          `<div class="pp-addr">${esc(s.addr || "")}</div>` +
          fuels +
-         `<div class="pp-pay">💳 Последняя оплата: ${fmtPayTime(s.lastTransactionAt)}</div>` +
+         `<div class="pp-pay">💳 Оплата (Т-Банк): ${fmtPayTime(s.lastTransactionAt)}</div>` +
+         (s.sberPayAt ? `<div class="pp-pay">💳 Оплата (Сбер): ${fmtPayTime(s.sberPayAt)}</div>` : "") +
          conf + selBtns;
 }
 
@@ -318,10 +340,16 @@ function renderMarkers() {
       else m.togglePopup();
     });
 
-    if (s.lastTransactionAt) {
-      const age = Date.now() - new Date(s.lastTransactionAt).getTime();
-      const cls = age < 3 * 3600e3 ? " fresh" : age > 24 * 3600e3 ? " stale" : "";
-      m.bindTooltip(`💳 ${payShortRel(s.lastTransactionAt)}`, {
+    if (s.lastTransactionAt || s.sberPayAt) {
+      const ref = s.lastTransactionAt || s.sberPayAt;
+      const age = Date.now() - new Date(ref).getTime();
+      let cls = age < 3 * 3600e3 ? " fresh" : age > 24 * 3600e3 ? " stale" : "";
+      let html = s.lastTransactionAt ? `💳 ${payShortRel(s.lastTransactionAt)}` : "";
+      if (s.sberPayAt) {
+        html += `<div class="pay-sber">СБ ${payShortRel(s.sberPayAt)}</div>`;
+        if (s.lastTransactionAt) cls += " two";
+      }
+      m.bindTooltip(html, {
         permanent: true, direction: "right", offset: [10, 0],
         className: "pay-badge" + cls,
       });

@@ -23,6 +23,7 @@ os.chdir(_app_dir())
 
 PORT = 8000
 API_HOST = "https://toplivo.tbank.ru"
+SBER_HOST = "https://sberazs.ru"
 OSRM_HOST = "https://router.project-osrm.org"
 
 
@@ -30,6 +31,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api/"):
             self.proxy(API_HOST + self.path)
+        elif self.path.startswith("/sber/"):
+            self.proxy(SBER_HOST + self.path[len("/sber"):])
         elif self.path.startswith("/osrm/"):
             self.proxy(OSRM_HOST + self.path[len("/osrm"):])
         else:
