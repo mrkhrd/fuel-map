@@ -33,7 +33,22 @@ python server.py
 `/sber/*` → sberazs.ru и `/osrm/*` → router.project-osrm.org
 (у внешних API нет CORS-заголовков).
 
-## Standalone exe (без Python)
+## Компактный exe (Rust, ~220 КБ)
+
+```
+build-rust.bat
+# → target\release\fuel-host.exe
+
+fuel-host.exe        # порт 8000
+fuel-host.exe 8123   # свой порт
+```
+
+Тот же сервер (статика + все три прокси), но без интерпретатора внутри:
+`index.html` вшит на этапе компиляции, TLS берётся из Windows (SChannel),
+поэтому бинарник ~210 КБ вместо ~9 МБ у PyInstaller. Лежащий рядом с exe
+`index.html` тоже имеет приоритет над встроенным.
+
+## Standalone exe (PyInstaller, ~9 МБ)
 
 ```
 build.bat

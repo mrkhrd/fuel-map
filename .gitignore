@@ -3,5 +3,8 @@ build/
 dist/
 *.spec
 
+# Rust build artifacts
+target/
+
 __pycache__/
 *.pyc
