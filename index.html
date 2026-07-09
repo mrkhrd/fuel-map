@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Топливо на АЗС — карта</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #map { height: 100%; }
+
+  .panel {
+    position: absolute; top: 12px; left: 56px; z-index: 1000;
+    background: #fff; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,.25);
+    padding: 10px 12px; max-width: 340px; font-size: 14px;
+  }
+  .panel h1 { font-size: 15px; margin: 0 0 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+  .row:last-child { margin-bottom: 0; }
+
+  .chip {
+    border: 1px solid #cfd4da; background: #f6f7f9; color: #333;
+    border-radius: 999px; padding: 4px 12px; cursor: pointer; font-size: 13px;
+  }
+  .chip.active { background: #1a73e8; border-color: #1a73e8; color: #fff; }
+
+  button.action {
+    border: none; border-radius: 8px; padding: 7px 12px; cursor: pointer;
+    font-size: 13px; font-weight: 600; background: #1a73e8; color: #fff;
+  }
+  button.action.secondary { background: #e8eaed; color: #333; }
+  button.action:disabled { opacity: .5; cursor: default; }
+
+  .legend { font-size: 12px; color: #444; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+  .legend span { display: inline-flex; align-items: center; gap: 4px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; border: 1px solid rgba(0,0,0,.2); }
+
+  .muted { color: #777; font-size: 12px; }
+  #routeInfo { font-size: 13px; }
+  #routeInfo a { color: #1a73e8; }
+
+  /* popup */
+  .pp-name { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
+  .pp-addr { color: #666; font-size: 12px; margin-bottom: 6px; }
+  .pp-fuel { display: flex; align-items: center; gap: 6px; margin: 2px 0; font-size: 13px; }
+  .pp-fuel b { min-width: 46px; display: inline-block; }
+  .pp-pay { margin-top: 6px; font-size: 12.5px; }
+  .pp-conf { color: #888; font-size: 11.5px; margin-top: 2px; }
+
+  .route-num {
+    background: #1a73e8; color: #fff; border-radius: 50%;
+    width: 20px; height: 20px; line-height: 20px; text-align: center;
+    font-size: 11px; font-weight: 700; border: 2px solid #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,.4);
+  }
+  .sel-num {
+    background: #7b1fa2; color: #fff; border-radius: 50%;
+    width: 18px; height: 18px; line-height: 18px; text-align: center;
+    font-size: 10px; font-weight: 700; border: 2px solid #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,.4);
+  }
+  .pp-btns { display: flex; gap: 4px; margin-top: 8px; }
+  .pp-btn {
+    flex: 1; border: 1px solid #cfd4da; border-radius: 7px; background: #f6f7f9;
+    padding: 5px 4px; cursor: pointer; font-size: 11.5px; font-weight: 600; color: #333;
+    white-space: nowrap;
+  }
+  .pp-btn.on { background: #7b1fa2; border-color: #7b1fa2; color: #fff; }
+  .pp-hint { margin-top: 5px; font-size: 10.5px; color: #999; }
+
+  /* payment-time pill next to markers */
+  .pay-badge {
+    background: #fff; border: 1px solid #d5d9df; border-radius: 999px;
+    padding: 1px 7px; font-size: 10.5px; font-weight: 600; color: #444;
+    box-shadow: 0 1px 3px rgba(0,0,0,.25);
+  }
+  .pay-badge::before { display: none; } /* no tooltip arrow */
+  .pay-badge.fresh { background: #e3f4e7; border-color: #b6dfc0; color: #1d6b31; }
+  .pay-badge.stale { background: #f1f2f4; color: #8a8f96; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div class="panel">
+  <h1>⛽ Наличие топлива на АЗС</h1>
+  <div class="row" id="fuelFilters">
+    <span class="muted">Топливо:</span>
+    <button class="chip active" data-fuel="all">Все</button>
+  </div>
+  <div class="row" id="statusFilters">
+    <span class="muted">Статус:</span>
+    <button class="chip active" data-status="available"><i class="dot" style="background:#2e9e44"></i> есть</button>
+    <button class="chip active" data-status="maybe_available"><i class="dot" style="background:#f2a516"></i> возможно</button>
+    <button class="chip active" data-status="not_available"><i class="dot" style="background:#d93838"></i> нет</button>
+    <button class="chip active" data-status="no_data"><i class="dot" style="background:#9aa0a6"></i> нет данных</button>
+  </div>
+  <div class="row">
+    <button class="action" id="routeBtn">Маршрут по видимым АЗС</button>
+    <button class="action secondary" id="clearRouteBtn" style="display:none">Сбросить</button>
+  </div>
+  <div class="row" id="selInfo" style="display:none">
+    <span>Выбрано: <b id="selCount">0</b> АЗС <span class="muted" id="selDetail"></span></span>
+    <button class="action secondary" id="clearSelBtn">Очистить выбор</button>
+  </div>
+  <div class="row" id="routeInfo" style="display:none"></div>
+  <div class="row muted" id="stats"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+"use strict";
+
+const STATUS_COLOR = {
+  available:       "#2e9e44",
+  maybe_available: "#f2a516",
+  not_available:   "#d93838",
+  no_data:         "#9aa0a6",
+};
+const STATUS_TEXT = {
+  available:       "есть топливо",
+  maybe_available: "возможно есть",
+  not_available:   "нет топлива",
+  no_data:         "нет данных",
+};
+const FUEL_LABEL = f => /^\d+$/.test(f) ? "АИ-" + f : f;
+
+const map = L.map("map").setView([60.0182, 30.4240], 12);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+}).addTo(map);
+
+const markersLayer = L.layerGroup().addTo(map);
+const routeLayer = L.layerGroup().addTo(map);
+
+let stations = new Map();   // id -> station
+let fuelFilter = "all";
+const statusFilter = new Set(Object.keys(STATUS_COLOR)); // visible statuses
+// route selection: explicit start/finish + pool of intermediate stops
+// (order of the middle pool is irrelevant — TSP reorders it)
+const sel = { start: null, end: null, middle: new Map() };
+
+function selRole(id) {
+  if (sel.start && sel.start.id === id) return "start";
+  if (sel.end && sel.end.id === id) return "end";
+  if (sel.middle.has(id)) return "middle";
+  return null;
+}
+function selRemove(id) {
+  if (sel.start && sel.start.id === id) sel.start = null;
+  if (sel.end && sel.end.id === id) sel.end = null;
+  sel.middle.delete(id);
+}
+function selList() {
+  const pts = [...sel.middle.values()];
+  if (sel.start) pts.unshift(sel.start);
+  if (sel.end) pts.push(sel.end);
+  return pts;
+}
+function selCount() {
+  return sel.middle.size + (sel.start ? 1 : 0) + (sel.end ? 1 : 0);
+}
+let knownFuels = new Set();
+let fetchTimer = null;
+let fetchSeq = 0;
+
+// ---------- data loading ----------
+
+async function loadStations() {
+  const b = map.getBounds().pad(0.15);
+  const url = `/api/v1/stations?minLat=${b.getSouth()}&maxLat=${b.getNorth()}` +
+              `&minLon=${b.getWest()}&maxLon=${b.getEast()}`;
+  const seq = ++fetchSeq;
+  try {
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (seq !== fetchSeq || data.status !== "ok") return;
+    stations = new Map(data.payload.map(s => [s.id, s]));
+    for (const s of data.payload)
+      Object.keys(s.statusByFuelType || {}).forEach(f => knownFuels.add(f));
+    renderFuelFilters();
+    renderMarkers();
+  } catch (e) {
+    console.error("load failed", e);
+  }
+}
+
+map.on("moveend", () => {
+  clearTimeout(fetchTimer);
+  fetchTimer = setTimeout(loadStations, 350);
+});
+
+// ---------- rendering ----------
+
+function stationStatus(s) {
+  if (fuelFilter === "all") return s.status || "no_data";
+  return (s.statusByFuelType || {})[fuelFilter] || "no_data";
+}
+
+function stationPasses(s) {
+  if (fuelFilter !== "all" && (s.statusByFuelType || {})[fuelFilter] === undefined) return false;
+  return statusFilter.has(stationStatus(s));
+}
+
+function fmtPayTime(iso) {
+  if (!iso) return "<span class='muted'>оплат не зафиксировано</span>";
+  const d = new Date(iso);
+  const mins = Math.round((Date.now() - d.getTime()) / 60000);
+  let rel;
+  if (mins < 1) rel = "только что";
+  else if (mins < 60) rel = `${mins} мин назад`;
+  else if (mins < 48 * 60) rel = `${Math.round(mins / 60)} ч назад`;
+  else rel = `${Math.round(mins / 1440)} дн назад`;
+  const abs = d.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return `${abs} <b>(${rel})</b>`;
+}
+
+function popupHtml(s) {
+  const fuels = Object.entries(s.statusByFuelType || {}).map(([f, st]) =>
+    `<div class="pp-fuel"><b>${FUEL_LABEL(f)}</b>` +
+    `<i class="dot" style="background:${STATUS_COLOR[st] || STATUS_COLOR.no_data}"></i>` +
+    `${STATUS_TEXT[st] || st}</div>`
+  ).join("") || "<div class='muted'>нет данных по видам топлива</div>";
+
+  const conf = s.confidence != null
+    ? `<div class="pp-conf">уверенность оценки: ${Math.round(s.confidence * 100)}%</div>` : "";
+
+  const role = selRole(s.id);
+  const btn = (r, label) =>
+    `<button class="pp-btn${role === r ? " on" : ""}" ` +
+    `onclick="setSel('${esc(s.id)}','${role === r ? "remove" : r}')">${label}</button>`;
+  const selBtns =
+    `<div class="pp-btns">${btn("start", "🚩 Старт")}${btn("middle", "+ Точка")}${btn("end", "🏁 Финиш")}</div>` +
+    `<div class="pp-hint">повторный клик по кнопке убирает из маршрута · ctrl+клик по маркеру добавляет сразу</div>`;
+
+  return `<div class="pp-name">${esc(s.name)}</div>` +
+         `<div class="pp-addr">${esc(s.addr || "")}</div>` +
+         fuels +
+         `<div class="pp-pay">💳 Последняя оплата: ${fmtPayTime(s.lastTransactionAt)}</div>` +
+         conf + selBtns;
+}
+
+window.setSel = function (id, role) {
+  const s = stations.get(id) || (selRole(id) && selList().find(p => p.id === id));
+  selRemove(id);
+  if (s && role !== "remove") {
+    if (role === "start") {
+      if (sel.start) sel.middle.set(sel.start.id, sel.start); // demote old start
+      sel.start = s;
+    } else if (role === "end") {
+      if (sel.end) sel.middle.set(sel.end.id, sel.end);
+      sel.end = s;
+    } else {
+      sel.middle.set(id, s);
+    }
+  }
+  map.closePopup();
+  renderMarkers();
+  updateSelUi();
+};
+
+function shortName(s) {
+  const n = s.name.length > 18 ? s.name.slice(0, 17) + "…" : s.name;
+  return esc(n);
+}
+
+function updateSelUi() {
+  const n = selCount();
+  document.getElementById("selInfo").style.display = n ? "" : "none";
+  document.getElementById("selCount").textContent = n;
+  document.getElementById("selDetail").innerHTML =
+    `· старт: ${sel.start ? "🚩 " + shortName(sel.start) : "авто"}` +
+    ` · финиш: ${sel.end ? "🏁 " + shortName(sel.end) : "авто"}`;
+  document.getElementById("routeBtn").textContent =
+    n >= 2 ? `Маршрут по выбранным (${n})` : "Маршрут по видимым АЗС";
+}
+
+function esc(t) {
+  return String(t).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function payShortRel(iso) {
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1) return "сейчас";
+  if (mins < 60) return `${mins} мин`;
+  if (mins < 48 * 60) return `${Math.round(mins / 60)} ч`;
+  return `${Math.round(mins / 1440)} дн`;
+}
+
+const ROLE_BADGE = { start: ["С", "#2e9e44"], middle: ["+", "#7b1fa2"], end: ["Ф", "#37474f"] };
+
+function renderMarkers() {
+  markersLayer.clearLayers();
+  let shown = 0;
+  for (const s of stations.values()) {
+    const role = selRole(s.id);
+    if (!stationPasses(s) && !role) continue;
+    shown++;
+    const st = stationStatus(s);
+    const m = L.circleMarker([s.lat, s.lon], {
+      radius: role ? 11 : 9,
+      color: role ? ROLE_BADGE[role][1] : "#fff",
+      weight: role ? 3 : 2,
+      fillColor: STATUS_COLOR[st] || STATUS_COLOR.no_data,
+      fillOpacity: 0.95,
+    }).bindPopup(() => popupHtml(s), { maxWidth: 280 })
+      .addTo(markersLayer);
+
+    // ctrl+click toggles selection silently; plain click opens the popup
+    m.off("click");
+    m.on("click", e => {
+      const oe = e.originalEvent || {};
+      if (oe.ctrlKey || oe.metaKey) window.setSel(s.id, selRole(s.id) ? "remove" : "middle");
+      else m.togglePopup();
+    });
+
+    if (s.lastTransactionAt) {
+      const age = Date.now() - new Date(s.lastTransactionAt).getTime();
+      const cls = age < 3 * 3600e3 ? " fresh" : age > 24 * 3600e3 ? " stale" : "";
+      m.bindTooltip(`💳 ${payShortRel(s.lastTransactionAt)}`, {
+        permanent: true, direction: "right", offset: [10, 0],
+        className: "pay-badge" + cls,
+      });
+    } else {
+      m.bindTooltip(esc(s.name));
+    }
+
+    if (role) {
+      const [ch, color] = ROLE_BADGE[role];
+      L.marker([s.lat, s.lon], {
+        icon: L.divIcon({ className: "", html: `<div class="sel-num" style="background:${color}">${ch}</div>`,
+                          iconSize: [18, 18], iconAnchor: [24, 26] }),
+        interactive: false,
+      }).addTo(markersLayer);
+    }
+  }
+  document.getElementById("stats").textContent =
+    `Загружено АЗС: ${stations.size}, показано: ${shown}`;
+}
+
+function renderFuelFilters() {
+  const box = document.getElementById("fuelFilters");
+  const have = new Set([...box.querySelectorAll(".chip")].map(b => b.dataset.fuel));
+  for (const f of [...knownFuels].sort()) {
+    if (have.has(f)) continue;
+    const btn = document.createElement("button");
+    btn.className = "chip";
+    btn.dataset.fuel = f;
+    btn.textContent = FUEL_LABEL(f);
+    box.appendChild(btn);
+  }
+}
+
+document.getElementById("fuelFilters").addEventListener("click", e => {
+  const btn = e.target.closest(".chip");
+  if (!btn) return;
+  fuelFilter = btn.dataset.fuel;
+  document.querySelectorAll("#fuelFilters .chip")
+    .forEach(b => b.classList.toggle("active", b === btn));
+  clearRoute();
+  renderMarkers();
+});
+
+document.getElementById("statusFilters").addEventListener("click", e => {
+  const btn = e.target.closest(".chip");
+  if (!btn) return;
+  const st = btn.dataset.status;
+  if (statusFilter.has(st)) statusFilter.delete(st);
+  else statusFilter.add(st);
+  btn.classList.toggle("active", statusFilter.has(st));
+  clearRoute();
+  renderMarkers();
+});
+
+// ---------- TSP route ----------
+
+function haversine(a, b) {
+  const R = 6371, rad = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * rad, dLon = (b.lon - a.lon) * rad;
+  const h = Math.sin(dLat / 2) ** 2 +
+            Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+// Open-path TSP on a symmetric cost matrix: best NN over allowed starts, then 2-opt.
+// fixStart pins point 0 as the start; fixEnd pins point n-1 as the finish.
+function tspSolve(D, fixStart = false, fixEnd = false) {
+  const n = D.length;
+  if (n < 2) return { order: D.map((_, i) => i), len: 0 };
+  if (n === 2) return { order: [0, 1], len: D[0][1] };
+  const pathLen = t => { let L = 0; for (let i = 1; i < n; i++) L += D[t[i - 1]][t[i]]; return L; };
+
+  let best = null, bestLen = Infinity;
+  const starts = fixStart ? [0]
+    : D.map((_, i) => i).filter(i => !(fixEnd && i === n - 1));
+  for (const s of starts) {
+    const tour = [s], used = new Uint8Array(n); used[s] = 1;
+    if (fixEnd) used[n - 1] = 1; // reserve the finish for last
+    const target = fixEnd ? n - 1 : n;
+    while (tour.length < target) {
+      const last = tour[tour.length - 1];
+      let bi = -1, bd = Infinity;
+      for (let j = 0; j < n; j++)
+        if (!used[j] && D[last][j] < bd) { bd = D[last][j]; bi = j; }
+      tour.push(bi); used[bi] = 1;
+    }
+    if (fixEnd) tour.push(n - 1);
+    const L = pathLen(tour);
+    if (L < bestLen) { bestLen = L; best = tour; }
+  }
+
+  // 2-opt (open path: reversing segment [i..k]; pinned endpoints stay put)
+  const iMin = fixStart ? 1 : 0, kMax = fixEnd ? n - 2 : n - 1;
+  let improved = true, guard = 0;
+  while (improved && guard++ < 200) {
+    improved = false;
+    for (let i = iMin; i < n - 1; i++) {
+      for (let k = i + 1; k <= kMax; k++) {
+        const before = (i > 0 ? D[best[i - 1]][best[i]] : 0) +
+                       (k < n - 1 ? D[best[k]][best[k + 1]] : 0);
+        const after  = (i > 0 ? D[best[i - 1]][best[k]] : 0) +
+                       (k < n - 1 ? D[best[i]][best[k + 1]] : 0);
+        if (after < before - 1e-9) {
+          let l = i, r = k;
+          while (l < r) { [best[l], best[r]] = [best[r], best[l]]; l++; r--; }
+          improved = true;
+        }
+      }
+    }
+  }
+  return { order: best, len: pathLen(best) };
+}
+
+function tspPath(pts, fixStart = false, fixEnd = false) {
+  return tspSolve(pts.map(a => pts.map(b => haversine(a, b))), fixStart, fixEnd);
+}
+
+function visibleStations() {
+  const b = map.getBounds();
+  return [...stations.values()].filter(s =>
+    stationPasses(s) && b.contains([s.lat, s.lon]));
+}
+
+// Road-network TSP via OSRM (proxied through /osrm):
+// 1) /table gives the real-road duration matrix, 2) our solver orders the stops,
+// 3) /route returns the driving geometry for that order.
+async function osrmJson(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`OSRM HTTP ${resp.status}`);
+  const data = await resp.json();
+  if (data.code !== "Ok") throw new Error(`OSRM: ${data.code}`);
+  return data;
+}
+
+async function roadTrip(pts, fixStart = false, fixEnd = false) {
+  const coordStr = a => a.map(s => `${s.lon.toFixed(6)},${s.lat.toFixed(6)}`).join(";");
+
+  const table = await osrmJson(
+    `/osrm/table/v1/driving/${coordStr(pts)}?annotations=duration`);
+  // symmetrize (2-opt assumes symmetric costs); null = unreachable
+  const n = pts.length, dur = table.durations;
+  const D = Array.from({ length: n }, (_, i) =>
+    Array.from({ length: n }, (_, j) => {
+      const a = dur[i][j], b = dur[j][i];
+      if (a == null && b == null) return 1e9;
+      return ((a ?? b) + (b ?? a)) / 2;
+    }));
+  const { order } = tspSolve(D, fixStart, fixEnd);
+  const ordered = order.map(i => pts[i]);
+
+  const route = await osrmJson(
+    `/osrm/route/v1/driving/${coordStr(ordered)}?geometries=geojson&overview=full`);
+  const r = route.routes[0];
+  return {
+    order,
+    geometry: r.geometry.coordinates.map(([lon, lat]) => [lat, lon]),
+    distKm: r.distance / 1000,
+    durMin: r.duration / 60,
+  };
+}
+
+async function buildRoute() {
+  const useSel = selCount() >= 2;
+  const pts = useSel ? selList() : visibleStations();
+  const fixStart = useSel && !!sel.start, fixEnd = useSel && !!sel.end;
+  const info = document.getElementById("routeInfo");
+  const btn = document.getElementById("routeBtn");
+  info.style.display = "";
+  if (pts.length < 2) {
+    info.textContent = "В видимой области меньше двух АЗС.";
+    return;
+  }
+  if (pts.length > 100) {
+    info.textContent = `АЗС слишком много (${pts.length}) — приблизьте карту.`;
+    return;
+  }
+
+  btn.disabled = true;
+  info.textContent = "Строим маршрут по дорогам…";
+
+  const pinned = [fixStart && "старт закреплён", fixEnd && "финиш закреплён"].filter(Boolean);
+  const kind = pinned.length ? ` (${pinned.join(", ")})` : "";
+  let ordered, line, summary;
+  try {
+    const t = await roadTrip(pts, fixStart, fixEnd);
+    ordered = t.order.map(i => pts[i]);
+    line = t.geometry;
+    summary = `<b>${ordered.length} АЗС</b>, ${t.distKm.toFixed(1)} км, ~${Math.round(t.durMin)} мин по дорогам${kind}`;
+  } catch (e) {
+    console.warn("OSRM failed, falling back to straight-line TSP:", e);
+    const { order, len } = tspPath(pts, fixStart, fixEnd);
+    ordered = order.map(i => pts[i]);
+    line = ordered.map(s => [s.lat, s.lon]);
+    summary = `<b>${ordered.length} АЗС</b>, ~${len.toFixed(1)} км по прямой (роутер недоступен)${kind}`;
+  } finally {
+    btn.disabled = false;
+  }
+
+  routeLayer.clearLayers();
+  L.polyline(line, { color: "#1a73e8", weight: 4, opacity: 0.85 }).addTo(routeLayer);
+  ordered.forEach((s, i) => {
+    L.marker([s.lat, s.lon], {
+      icon: L.divIcon({ className: "", html: `<div class="route-num">${i + 1}</div>`,
+                        iconSize: [20, 20], iconAnchor: [10, 24] }),
+      interactive: false,
+    }).addTo(routeLayer);
+  });
+
+  const ymUrl = "https://yandex.ru/maps/?rtt=auto&rtext=" +
+    ordered.slice(0, 10).map(s => `${s.lat},${s.lon}`).join("~");
+  info.innerHTML = `Маршрут: ${summary}` +
+    (ordered.length > 10
+      ? ` &middot; <a href="${ymUrl}" target="_blank">первые 10 в Я.Картах</a>`
+      : ` &middot; <a href="${ymUrl}" target="_blank">открыть в Я.Картах</a>`);
+  document.getElementById("clearRouteBtn").style.display = "";
+}
+
+function clearRoute() {
+  routeLayer.clearLayers();
+  const info = document.getElementById("routeInfo");
+  info.style.display = "none";
+  info.textContent = "";
+  document.getElementById("clearRouteBtn").style.display = "none";
+}
+
+document.getElementById("routeBtn").addEventListener("click", buildRoute);
+document.getElementById("clearRouteBtn").addEventListener("click", clearRoute);
+document.getElementById("clearSelBtn").addEventListener("click", () => {
+  sel.start = sel.end = null;
+  sel.middle.clear();
+  clearRoute();
+  renderMarkers();
+  updateSelUi();
+});
+
+// keep relative payment times fresh (skip while a popup is open)
+setInterval(() => {
+  if (!(map._popup && map._popup.isOpen())) renderMarkers();
+}, 60000);
+
+loadStations();
+</script>
+</body>
+</html>
