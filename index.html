@@ -77,6 +77,8 @@
   .pay-badge::before { display: none; } /* no tooltip arrow */
   .pay-badge.fresh { background: #e3f4e7; border-color: #b6dfc0; color: #1d6b31; }
   .pay-badge.stale { background: #f1f2f4; color: #8a8f96; }
+
+  .leaflet-control-attribution { font-size: 9px; opacity: .6; }
 </style>
 </head>
 <body>
@@ -126,6 +128,7 @@ const STATUS_TEXT = {
 const FUEL_LABEL = f => /^\d+$/.test(f) ? "АИ-" + f : f;
 
 const map = L.map("map").setView([60.0182, 30.4240], 12);
+map.attributionControl.setPrefix(false); // drop the "Leaflet" link, keep OSM credit
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',

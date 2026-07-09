@@ -32,11 +32,15 @@ python server.py
 ## Standalone exe (без Python)
 
 ```
-pip install pyinstaller
-python -m PyInstaller --onefile --name fuel-map-server server.py
+build.bat
 ```
 
-Скопировать `dist/fuel-map-server.exe` + `index.html` в одну папку и запустить.
+(ставит PyInstaller при необходимости, останавливает запущенный exe и собирает заново;
+вручную: `python -m PyInstaller --onefile --name fuel-map-server --add-data "index.html;." server.py`)
+
+`dist/fuel-map-server.exe` полностью автономен (`index.html` зашит внутрь) —
+достаточно скопировать и запустить. Если рядом с exe положить свой `index.html`,
+сервер отдаст его вместо встроенного.
 
 ## Автозапуск на Windows
 

@@ -8,9 +8,18 @@ import socketserver
 import sys
 import urllib.request
 
-# serve files from the app dir (next to the exe when frozen by PyInstaller)
-_base = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__)
-os.chdir(os.path.dirname(_base))
+def _app_dir():
+    if getattr(sys, "frozen", False):  # PyInstaller exe
+        exe_dir = os.path.dirname(sys.executable)
+        # index.html next to the exe wins (easy to customize) …
+        if os.path.exists(os.path.join(exe_dir, "index.html")):
+            return exe_dir
+        # … otherwise use the copy bundled inside the exe
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+os.chdir(_app_dir())
 
 PORT = 8000
 API_HOST = "https://toplivo.tbank.ru"
