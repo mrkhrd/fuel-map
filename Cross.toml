@@ -1,0 +1,3 @@
+# let `cross` pass the release version through to option_env!("APP_VERSION")
+[build.env]
+passthrough = ["APP_VERSION"]

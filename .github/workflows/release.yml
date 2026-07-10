@@ -61,6 +61,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Cross-build static binaries (amd64, arm64, armv7)
+        env:
+          APP_VERSION: ${{ needs.version.outputs.tag }}
+        run: |
+          declare -A t=(
+            [linux/amd64]=x86_64-unknown-linux-musl
+            [linux/arm64]=aarch64-unknown-linux-musl
+            [linux/arm/v7]=armv7-unknown-linux-musleabihf
+          )
+          for p in "${!t[@]}"; do
+            cross build --release --target "${t[$p]}"
+            mkdir -p "bin/$p"
+            cp "target/${t[$p]}/release/fuel-host" "bin/$p/"
+          done
+      - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -69,9 +88,9 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile.release
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
-          build-args: |
-            APP_VERSION=${{ needs.version.outputs.tag }}
           tags: |
             ghcr.io/${{ github.repository }}:${{ needs.version.outputs.tag }}
             ghcr.io/${{ github.repository }}:latest

@@ -1,0 +1,8 @@
+# CI multi-arch image from cross-compiled static binaries (see release.yml).
+# Binaries are musl-static with embedded CA roots (rustls + webpki-roots),
+# so scratch works: no libc, no ca-certificates, ~2 MB image.
+FROM scratch
+ARG TARGETPLATFORM
+COPY bin/${TARGETPLATFORM}/fuel-host /fuel-host
+EXPOSE 8000
+ENTRYPOINT ["/fuel-host"]

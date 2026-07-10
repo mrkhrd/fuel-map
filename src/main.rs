@@ -149,11 +149,40 @@ fn connect(host: &str) -> Result<TcpStream, Box<dyn std::error::Error>> {
     Err(last.map(Into::into).unwrap_or_else(|| "dns: no address".into()))
 }
 
+trait ReadWrite: Read + Write {}
+impl<T: Read + Write> ReadWrite for T {}
+
+#[cfg(windows)]
+fn tls_connect(host: &str, tcp: TcpStream) -> Result<Box<dyn ReadWrite>, Box<dyn std::error::Error>> {
+    Ok(Box::new(native_tls::TlsConnector::new()?.connect(host, tcp)?))
+}
+
+#[cfg(not(windows))]
+fn tls_connect(host: &str, tcp: TcpStream) -> Result<Box<dyn ReadWrite>, Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    static CFG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    let cfg = CFG
+        .get_or_init(|| {
+            let roots = rustls::RootCertStore {
+                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+            };
+            Arc::new(
+                rustls::ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth(),
+            )
+        })
+        .clone();
+    let name = rustls::pki_types::ServerName::try_from(host.to_string())?;
+    let conn = rustls::ClientConnection::new(cfg, name)?;
+    Ok(Box::new(rustls::StreamOwned::new(conn, tcp)))
+}
+
 fn fetch_inner(host: &str, path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let tcp = connect(host)?;
     tcp.set_read_timeout(Some(Duration::from_secs(20)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(20)))?;
-    let mut tls = native_tls::TlsConnector::new()?.connect(host, tcp)?;
+    let mut tls = tls_connect(host, tcp)?;
 
     // HTTP/1.1 (tbank rejects 1.0 with 426); Connection: close delimits the body
     write!(
