@@ -78,9 +78,11 @@
   .pay-badge.fresh { background: #e3f4e7; border-color: #b6dfc0; color: #1d6b31; }
   .pay-badge.stale { background: #f1f2f4; color: #8a8f96; }
   .pay-badge.two { border-radius: 9px; }
-  .pay-badge .pay-sber { font-size: 9.5px; font-weight: 700; color: #1d9440; line-height: 1.2; }
+  .pay-badge .bank-line { display: flex; align-items: center; gap: 3px; line-height: 1.35; }
+  .pay-badge .bpay { font-size: 10px; font-weight: 600; }
+  .pay-badge .pay-sber { color: #1d9440; }
   .pay-badge.stale .pay-sber { color: #8a8f96; }
-  .pay-badge .pay-fuels { display: flex; gap: 2px; margin-top: 2px; }
+  .pay-badge .fsrc { font-size: 8px; font-weight: 700; color: #98a0a8; }
   .pay-badge .fchip {
     color: #fff; border-radius: 3px; padding: 0 3px;
     font-size: 8.5px; font-weight: 700; line-height: 12px;
@@ -141,7 +143,23 @@ const STATUS_TEXT = {
   not_available:   "нет топлива",
   no_data:         "нет данных",
 };
-const FUEL_LABEL = f => /^\d+$/.test(f) ? "АИ-" + f : f;
+const FUEL_NAMES = { diesel: "ДТ", propane: "Пропан", methane: "Метан", "98/100": "АИ-98/100" };
+const FUEL_LABEL = f => FUEL_NAMES[f] || (/^\d+$/.test(f) ? "АИ-" + f : f);
+const FUEL_CHIP = f => ({ diesel: "ДТ", propane: "Газ", methane: "Мет", "98/100": "98+" }[f] || f);
+// canonical fuel keys shared by both sources (tbank uses "92"/"95", sber uses ai92/…)
+const SBER_TO_FUEL = { ai80: "80", ai92: "92", ai95: "95", ai98: "98", ai100: "100",
+                       ai98_100: "98/100", diesel: "diesel", propane: "propane", methane: "methane" };
+// for filtering/marker color sber counts only as fresh positive evidence:
+// "stale" is old data, it must not override tbank (e.g. resurrect a no-fuel station)
+const SBER_TO_STATUS = { available: "available", stale: "no_data",
+                         unavailable: "not_available", unknown: "no_data" };
+const STATUS_RANK = { available: 3, maybe_available: 2, not_available: 1, no_data: 0 };
+const fuelSort = (a, b) => {
+  const na = /^\d/.test(a), nb = /^\d/.test(b);
+  if (na && nb) return parseInt(a) - parseInt(b);
+  if (na !== nb) return na ? -1 : 1;
+  return a.localeCompare(b);
+};
 
 // sber fuel/status dictionaries
 const SBER_FUEL_LABEL = { ai80: "АИ-80", ai92: "АИ-92", ai95: "АИ-95", ai98: "АИ-98",
@@ -221,6 +239,12 @@ async function loadStations() {
   const sber = await sberP;
   if (seq !== fetchSeq || !sber) return;
   attachSberPayments(sber.stations || []);
+  for (const x of sber.stations || [])
+    for (const f of x.fuels || []) {
+      const k = SBER_TO_FUEL[f.type];
+      if (k) knownFuels.add(k);
+    }
+  renderFuelFilters();
   if (!(map._popup && map._popup.isOpen())) renderMarkers();
 }
 
@@ -248,13 +272,29 @@ map.on("moveend", () => {
 
 // ---------- rendering ----------
 
+// sber fuel entry for a canonical fuel key, if the station is matched
+function sberFuel(s, f) {
+  return ((s.sber && s.sber.fuels) || []).find(x => SBER_TO_FUEL[x.type] === f);
+}
+
+// status is the OR (most positive) of tbank and sber
 function stationStatus(s) {
-  if (fuelFilter === "all") return s.status || "no_data";
-  return (s.statusByFuelType || {})[fuelFilter] || "no_data";
+  let t, b;
+  if (fuelFilter === "all") {
+    t = s.status || "no_data";
+    b = SBER_TO_STATUS[s.sber && s.sber.availabilityStatus] || "no_data";
+  } else {
+    t = (s.statusByFuelType || {})[fuelFilter] || "no_data";
+    const f = sberFuel(s, fuelFilter);
+    b = SBER_TO_STATUS[f && f.availabilityStatus] || "no_data";
+  }
+  return STATUS_RANK[t] >= STATUS_RANK[b] ? t : b;
 }
 
 function stationPasses(s) {
-  if (fuelFilter !== "all" && (s.statusByFuelType || {})[fuelFilter] === undefined) return false;
+  if (fuelFilter !== "all" &&
+      (s.statusByFuelType || {})[fuelFilter] === undefined &&
+      !sberFuel(s, fuelFilter)) return false;
   return statusFilter.has(stationStatus(s));
 }
 
@@ -390,17 +430,27 @@ function renderMarkers() {
       else m.togglePopup();
     });
 
+    // one badge line per bank: source label, payment info, fuel chips
+    const bankLine = (src, pay, payCls, chips) =>
+      `<div class="bank-line"><span class="fsrc">${src}</span>` +
+      (pay ? `<span class="${payCls}">${pay}</span>` : "") +
+      chips.map(([label, color]) =>
+        `<span class="fchip" style="background:${color}">${label}</span>`).join("") +
+      `</div>`;
+
     const rows = [];
-    if (s.lastTransactionAt) rows.push(`💳 ${payShortRel(s.lastTransactionAt)}`);
-    if (s.sberPayAt) rows.push(`<div class="pay-sber">СБ ${payShortRel(s.sberPayAt)}</div>`);
-    // per-fuel chips from sber (only fuels with a definite status)
-    const chips = ((s.sber && s.sber.fuels) || [])
-      .filter(f => f.availabilityStatus && f.availabilityStatus !== "unknown");
-    if (chips.length) {
-      rows.push(`<div class="pay-fuels">` + chips.map(f =>
-        `<span class="fchip" style="background:${(SBER_STATUS[f.availabilityStatus] || SBER_STATUS.unknown)[1]}">` +
-        `${SBER_FUEL_CHIP[f.type] || esc(f.type)}</span>`).join("") + `</div>`);
-    }
+    const tFuels = Object.entries(s.statusByFuelType || {}).map(([f, st]) =>
+      [FUEL_CHIP(f), STATUS_COLOR[st] || STATUS_COLOR.no_data]);
+    const tPay = s.lastTransactionAt ? `💳 ${payShortRel(s.lastTransactionAt)}` : "";
+    if (tPay || tFuels.length) rows.push(bankLine("Т", tPay, "bpay", tFuels));
+
+    const sFuels = ((s.sber && s.sber.fuels) || []).map(f =>
+      [SBER_FUEL_CHIP[f.type] || esc(f.type),
+       (SBER_STATUS[f.availabilityStatus] || SBER_STATUS.unknown)[1]]);
+    let sPay = s.sberPayAt ? `💳 ${payShortRel(s.sberPayAt)}` : "";
+    if (s.sber && s.sber.operationsCount)
+      sPay += (sPay ? " · " : "") + `${s.sber.operationsCount} опл`;
+    if (sPay || sFuels.length) rows.push(bankLine("С", sPay, "bpay pay-sber", sFuels));
     if (rows.length) {
       const ref = s.lastTransactionAt || s.sberPayAt;
       let cls = "";
@@ -433,7 +483,7 @@ function renderMarkers() {
 function renderFuelFilters() {
   const box = document.getElementById("fuelFilters");
   const have = new Set([...box.querySelectorAll(".chip")].map(b => b.dataset.fuel));
-  for (const f of [...knownFuels].sort()) {
+  for (const f of [...knownFuels].sort(fuelSort)) {
     if (have.has(f)) continue;
     const btn = document.createElement("button");
     btn.className = "chip";
