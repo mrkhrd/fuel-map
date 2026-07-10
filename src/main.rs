@@ -129,7 +129,11 @@ fn connect(host: &str) -> Result<TcpStream, Box<dyn std::error::Error>> {
     static GOOD: OnceLock<Mutex<HashMap<String, SocketAddr>>> = OnceLock::new();
     let good = GOOD.get_or_init(|| Mutex::new(HashMap::new()));
 
-    if let Some(addr) = good.lock().unwrap().get(host).copied() {
+    // NB: copy the addr out so the guard drops here — in edition 2021 an
+    // `if let` on `lock().unwrap().get(..)` holds the lock for the whole body,
+    // and the remove() below would self-deadlock
+    let cached = good.lock().unwrap().get(host).copied();
+    if let Some(addr) = cached {
         if let Ok(s) = TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
             return Ok(s);
         }
