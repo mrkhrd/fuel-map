@@ -25,8 +25,15 @@
 Rust-хост (~240 КБ, `index.html` вшит при сборке, TLS из ОС):
 
 ```
-build-rust.bat            # → target\release\fuel-host.exe
-fuel-host.exe [порт]      # по умолчанию 8000
+build-rust.bat                        # → target\release\fuel-host.exe
+fuel-host.exe [порт] [host=ip ...]    # порт по умолчанию 8000
+```
+
+`host=ip` закрепляет адрес внешнего API (аналог docker `extra_hosts`) — нужно
+для sberazs.ru, который переехал за DDoS-Guard и отдаёт JS-челлендж вместо JSON:
+
+```
+fuel-host.exe 8000 sberazs.ru=213.171.31.57
 ```
 
 Альтернативы: `python server.py` или PyInstaller-сборка `build.bat`
@@ -43,9 +50,11 @@ CORS-заголовков). `index.html` рядом с exe имеет приор
 версия зашита в бинарник и печатается при старте:
 
 ```
-docker run -d -p 8000:8000 ghcr.io/mrkhrd/fuel-map:latest
+docker run -d -p 8000:8000 --add-host sberazs.ru:213.171.31.57 ghcr.io/mrkhrd/fuel-map:latest
 docker run -d -p 8123:8123 ghcr.io/mrkhrd/fuel-map:latest 8123   # свой порт
 ```
+
+В compose пин задаётся через `extra_hosts: ["sberazs.ru:213.171.31.57"]`.
 
 ## Автозапуск на Windows
 

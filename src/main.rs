@@ -18,17 +18,39 @@ const ROUTES: [(&str, &str, bool); 3] = [
     ("/osrm/", "router.project-osrm.org", true),
 ];
 
+// upstream address pins (like docker extra_hosts), set once from CLI args
+static PINS: OnceLock<HashMap<String, SocketAddr>> = OnceLock::new();
+
 fn main() -> io::Result<()> {
-    let port: u16 = match env::args().nth(1) {
-        Some(a) => a.parse().unwrap_or_else(|_| {
-            eprintln!("usage: fuel-host [port]   (default {DEFAULT_PORT})");
-            std::process::exit(2);
-        }),
-        None => DEFAULT_PORT,
+    let usage = || -> ! {
+        eprintln!(
+            "usage: fuel-host [port] [host=ip ...]   (default port {DEFAULT_PORT}; \
+             host=ip pins an upstream address, e.g. sberazs.ru=213.171.31.57)"
+        );
+        std::process::exit(2);
     };
+    let mut port = DEFAULT_PORT;
+    let mut pins = HashMap::new();
+    for arg in env::args().skip(1) {
+        if let Some((host, ip)) = arg.split_once('=') {
+            match ip.parse() {
+                Ok(ip) => pins.insert(host.to_string(), SocketAddr::new(ip, 443)),
+                Err(_) => usage(),
+            };
+        } else {
+            match arg.parse() {
+                Ok(p) => port = p,
+                Err(_) => usage(),
+            }
+        }
+    }
     let version = option_env!("APP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
     let listener = TcpListener::bind(("0.0.0.0", port))?;
     println!("fuel-host {version} — serving on http://localhost:{port} (log times in UTC)");
+    for (host, addr) in &pins {
+        println!("  pin: {host} -> {addr}");
+    }
+    let _ = PINS.set(pins);
     for stream in listener.incoming().flatten() {
         thread::spawn(move || {
             let _ = handle(stream);
@@ -126,6 +148,9 @@ fn fetch(host: &str, path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> 
 // DNS may return several addresses and some can be dead (sberazs.ru does this);
 // walk them all with a short timeout and remember the one that worked
 fn connect(host: &str) -> Result<TcpStream, Box<dyn std::error::Error>> {
+    if let Some(addr) = PINS.get().and_then(|p| p.get(host)) {
+        return Ok(TcpStream::connect_timeout(addr, Duration::from_secs(5))?);
+    }
     static GOOD: OnceLock<Mutex<HashMap<String, SocketAddr>>> = OnceLock::new();
     let good = GOOD.get_or_init(|| Mutex::new(HashMap::new()));
 

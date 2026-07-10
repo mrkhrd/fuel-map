@@ -6,15 +6,23 @@
 <title>Топливо на АЗС — карта</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
-  html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+               -webkit-tap-highlight-color: transparent; }
   #map { height: 100%; }
 
   .panel {
-    position: absolute; top: 12px; left: 56px; z-index: 1000;
+    position: absolute; top: 12px; left: 12px; z-index: 1000;
     background: #fff; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,.25);
     padding: 10px 12px; max-width: 340px; font-size: 14px;
   }
-  .panel h1 { font-size: 15px; margin: 0 0 8px; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+                cursor: pointer; user-select: none; }
+  .panel h1 { font-size: 15px; margin: 0; }
+  .fold { color: #666; font-size: 20px; line-height: 1; padding: 0 4px; }
+  .panel-body { margin-top: 8px; }
+  .panel.collapsed .panel-body { display: none; }
+  .opt { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; }
+  .opt input { accent-color: #1a73e8; margin: 0; }
   .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
   .row:last-child { margin-bottom: 0; }
 
@@ -97,13 +105,26 @@
   .pp-src-st { font-weight: 400; }
 
   .leaflet-control-attribution { font-size: 9px; opacity: .6; }
+
+  /* mobile: full-width panel (zoom control moves bottom-right), larger touch targets */
+  @media (max-width: 640px) {
+    .panel { left: 10px; right: 10px; top: 10px; max-width: none; }
+    .chip { padding: 8px 14px; font-size: 14px; }
+    button.action { padding: 10px 14px; font-size: 14px; }
+    .opt { font-size: 14px; }
+    .pp-btn { padding: 8px 4px; }
+  }
 </style>
 </head>
 <body>
 <div id="map"></div>
 
-<div class="panel">
-  <h1>⛽ Наличие топлива на АЗС</h1>
+<div class="panel" id="panel">
+  <div class="panel-head" id="panelHead">
+    <h1>⛽ Наличие топлива на АЗС</h1>
+    <span class="fold" id="foldIcon">▾</span>
+  </div>
+  <div class="panel-body">
   <div class="row" id="fuelFilters">
     <span class="muted">Топливо:</span>
     <button class="chip active" data-fuel="all">Все</button>
@@ -124,7 +145,12 @@
     <button class="action secondary" id="clearSelBtn">Очистить выбор</button>
   </div>
   <div class="row" id="routeInfo" style="display:none"></div>
+  <div class="row">
+    <label class="opt"><input type="checkbox" id="optRefresh"> автообновление (1 мин)</label>
+    <label class="opt"><input type="checkbox" id="optTrack"> следить за геопозицией</label>
+  </div>
   <div class="row muted" id="stats"></div>
+  </div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -172,7 +198,27 @@ const SBER_STATUS = { available:   ["есть топливо", "#2e9e44"],
                       unavailable: ["нет топлива", "#d93838"],
                       unknown:     ["нет данных", "#9aa0a6"] };
 
-const map = L.map("map").setView([60.0182, 30.4240], 12);
+// ---------- preferences (persisted across reloads) ----------
+const PREFS_KEY = "fuelmap.prefs";
+let prefs = {};
+try { prefs = JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch (e) {}
+const isMobile = matchMedia("(max-width: 640px)").matches;
+let collapsed = prefs.collapsed !== undefined ? prefs.collapsed : isMobile;
+let autoRefresh = !!prefs.autoRefresh;
+let trackMe = !!prefs.track;
+
+function savePrefs() {
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify({
+      fuel: fuelFilter, statuses: [...statusFilter],
+      collapsed, autoRefresh, track: trackMe,
+    }));
+  } catch (e) {}
+}
+
+// zoom control bottom-right so the (possibly full-width) panel never covers it
+const map = L.map("map", { zoomControl: false }).setView([60.0182, 30.4240], 12);
+L.control.zoom({ position: "bottomright" }).addTo(map);
 map.attributionControl.setPrefix(false); // drop the "Leaflet" link, keep OSM credit
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
@@ -183,8 +229,11 @@ const markersLayer = L.layerGroup().addTo(map);
 const routeLayer = L.layerGroup().addTo(map);
 
 let stations = new Map();   // id -> station
-let fuelFilter = "all";
-const statusFilter = new Set(Object.keys(STATUS_COLOR)); // visible statuses
+let fuelFilter = prefs.fuel || "all";
+// visible statuses; an empty saved set falls back to "all" — restoring a blank map helps nobody
+const savedStatuses = Array.isArray(prefs.statuses)
+  ? prefs.statuses.filter(s => STATUS_COLOR[s]) : [];
+const statusFilter = new Set(savedStatuses.length ? savedStatuses : Object.keys(STATUS_COLOR));
 // route selection: explicit start/finish + pool of intermediate stops
 // (order of the middle pool is irrelevant — TSP reorders it)
 const sel = { start: null, end: null, middle: new Map() };
@@ -491,6 +540,8 @@ function renderFuelFilters() {
     btn.textContent = FUEL_LABEL(f);
     box.appendChild(btn);
   }
+  box.querySelectorAll(".chip")
+    .forEach(b => b.classList.toggle("active", b.dataset.fuel === fuelFilter));
 }
 
 document.getElementById("fuelFilters").addEventListener("click", e => {
@@ -501,6 +552,7 @@ document.getElementById("fuelFilters").addEventListener("click", e => {
     .forEach(b => b.classList.toggle("active", b === btn));
   clearRoute();
   renderMarkers();
+  savePrefs();
 });
 
 document.getElementById("statusFilters").addEventListener("click", e => {
@@ -512,6 +564,7 @@ document.getElementById("statusFilters").addEventListener("click", e => {
   btn.classList.toggle("active", statusFilter.has(st));
   clearRoute();
   renderMarkers();
+  savePrefs();
 });
 
 // ---------- TSP route ----------
@@ -694,6 +747,88 @@ document.getElementById("clearSelBtn").addEventListener("click", () => {
   renderMarkers();
   updateSelUi();
 });
+
+// ---------- geolocation ----------
+
+const meLayer = L.layerGroup().addTo(map);
+let watchId = null;
+
+function showMe(c) {
+  meLayer.clearLayers();
+  if (c.accuracy && c.accuracy < 2000)
+    L.circle([c.latitude, c.longitude], { radius: c.accuracy, color: "#1a73e8",
+      weight: 1, fillOpacity: 0.07, interactive: false }).addTo(meLayer);
+  L.circleMarker([c.latitude, c.longitude], { radius: 6, color: "#fff", weight: 2,
+    fillColor: "#1a73e8", fillOpacity: 1, interactive: false })
+    .bindTooltip("Вы здесь").addTo(meLayer);
+}
+
+function startTracking() {
+  if (!navigator.geolocation || watchId != null) return;
+  watchId = navigator.geolocation.watchPosition(p => {
+    showMe(p.coords);
+    map.panTo([p.coords.latitude, p.coords.longitude]);
+  }, e => console.warn("geolocation:", e.message),
+  { enableHighAccuracy: true, maximumAge: 15000 });
+}
+function stopTracking() {
+  if (watchId != null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+}
+
+// start from the current GNSS position when the browser allows it
+// (needs https or localhost); otherwise the default view stays
+if (navigator.geolocation) {
+  navigator.geolocation.getCurrentPosition(p => {
+    showMe(p.coords);
+    map.setView([p.coords.latitude, p.coords.longitude], 17);
+  }, () => {}, { enableHighAccuracy: true, timeout: 6000, maximumAge: 60000 });
+}
+if (trackMe) startTracking();
+
+// ---------- auto refresh + panel/options wiring ----------
+
+let refreshTimer = null;
+function applyAutoRefresh() {
+  clearInterval(refreshTimer);
+  refreshTimer = null;
+  if (autoRefresh)
+    refreshTimer = setInterval(() => {
+      if (!(map._popup && map._popup.isOpen())) loadStations();
+    }, 60000);
+}
+applyAutoRefresh();
+
+function applyCollapsed() {
+  document.getElementById("panel").classList.toggle("collapsed", collapsed);
+  document.getElementById("foldIcon").textContent = collapsed ? "▸" : "▾";
+}
+document.getElementById("panelHead").addEventListener("click", () => {
+  collapsed = !collapsed;
+  applyCollapsed();
+  savePrefs();
+});
+applyCollapsed();
+
+const optRefresh = document.getElementById("optRefresh");
+const optTrack = document.getElementById("optTrack");
+optRefresh.checked = autoRefresh;
+optTrack.checked = trackMe;
+optRefresh.addEventListener("change", () => {
+  autoRefresh = optRefresh.checked;
+  applyAutoRefresh();
+  savePrefs();
+});
+optTrack.addEventListener("change", () => {
+  trackMe = optTrack.checked;
+  if (trackMe) startTracking(); else stopTracking();
+  savePrefs();
+});
+
+// reflect restored filters in the static chips (fuel chips handled by renderFuelFilters)
+document.querySelectorAll("#statusFilters .chip")
+  .forEach(b => b.classList.toggle("active", statusFilter.has(b.dataset.status)));
+document.querySelectorAll("#fuelFilters .chip")
+  .forEach(b => b.classList.toggle("active", b.dataset.fuel === fuelFilter));
 
 // keep relative payment times fresh (skip while a popup is open)
 setInterval(() => {
