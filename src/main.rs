@@ -1,8 +1,10 @@
 //! Compact host for fuel-map: static index.html + CORS proxy.
 //! TLS comes from the OS (SChannel via native-tls), nothing bundled.
 
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs, str, thread};
 
@@ -121,12 +123,34 @@ fn fetch(host: &str, path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> 
     r
 }
 
+// DNS may return several addresses and some can be dead (sberazs.ru does this);
+// walk them all with a short timeout and remember the one that worked
+fn connect(host: &str) -> Result<TcpStream, Box<dyn std::error::Error>> {
+    static GOOD: OnceLock<Mutex<HashMap<String, SocketAddr>>> = OnceLock::new();
+    let good = GOOD.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Some(addr) = good.lock().unwrap().get(host).copied() {
+        if let Ok(s) = TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
+            return Ok(s);
+        }
+        good.lock().unwrap().remove(host);
+    }
+    let mut last: Option<io::Error> = None;
+    for addr in (host, 443).to_socket_addrs()? {
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
+            Ok(s) => {
+                log(format_args!("  * {host} -> {addr}"));
+                good.lock().unwrap().insert(host.to_string(), addr);
+                return Ok(s);
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.map(Into::into).unwrap_or_else(|| "dns: no address".into()))
+}
+
 fn fetch_inner(host: &str, path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let addr = (host, 443)
-        .to_socket_addrs()?
-        .next()
-        .ok_or("dns: no address")?;
-    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
+    let tcp = connect(host)?;
     tcp.set_read_timeout(Some(Duration::from_secs(20)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(20)))?;
     let mut tls = native_tls::TlsConnector::new()?.connect(host, tcp)?;
