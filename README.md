@@ -61,6 +61,20 @@ build.bat
 достаточно скопировать и запустить. Если рядом с exe положить свой `index.html`,
 сервер отдаст его вместо встроенного.
 
+## Релизы и Docker
+
+Каждый push в `main` автоматически повышает patch-версию (тег `vX.Y.Z`),
+публикует GitHub Release с `fuel-map-vX.Y.Z-win64.zip` (exe + README) и
+docker-образ:
+
+```
+docker run -d -p 8000:8000 ghcr.io/mrkhrd/fuel-map:latest
+docker run -d -p 8123:8123 ghcr.io/mrkhrd/fuel-map:latest 8123   # свой порт
+```
+
+Версия зашивается в бинарник и печатается при старте; сервер пишет в консоль
+все запросы клиента и походы к внешним API с таймингами.
+
 ## Автозапуск на Windows
 
 ```powershell

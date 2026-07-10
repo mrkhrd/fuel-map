@@ -2,8 +2,8 @@
 //! TLS comes from the OS (SChannel via native-tls), nothing bundled.
 
 use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::time::Duration;
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs, str, thread};
 
 const DEFAULT_PORT: u16 = 8000;
@@ -24,8 +24,9 @@ fn main() -> io::Result<()> {
         }),
         None => DEFAULT_PORT,
     };
+    let version = option_env!("APP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
     let listener = TcpListener::bind(("0.0.0.0", port))?;
-    println!("Serving on http://localhost:{port}");
+    println!("fuel-host {version} — serving on http://localhost:{port} (log times in UTC)");
     for stream in listener.incoming().flatten() {
         thread::spawn(move || {
             let _ = handle(stream);
@@ -51,36 +52,81 @@ fn handle(mut s: TcpStream) -> io::Result<()> {
     let mut parts = str::from_utf8(line).unwrap_or("").split(' ');
     let method = parts.next().unwrap_or("");
     let path = parts.next().unwrap_or("/");
-    if method != "GET" {
-        return respond(&mut s, 405, "text/plain", b"method not allowed");
-    }
 
-    for (prefix, host, strip) in ROUTES {
-        if path.starts_with(prefix) {
-            let upstream = if strip { &path[prefix.len() - 1..] } else { path };
-            return match fetch(host, upstream) {
-                Ok(body) => respond(&mut s, 200, "application/json; charset=utf-8", &body),
-                Err(e) => {
-                    respond(&mut s, 502, "text/plain", format!("upstream error: {e}").as_bytes())
-                }
-            };
-        }
-    }
+    let t0 = Instant::now();
+    log(format_args!("> {method} {path}"));
 
-    match path.split('?').next().unwrap_or("/") {
-        "/" | "/index.html" => {
-            // index.html next to the exe wins (easy to customize), else the embedded copy
-            let external = env::current_exe()
-                .ok()
-                .and_then(|p| fs::read(p.with_file_name("index.html")).ok());
-            respond(&mut s, 200, "text/html; charset=utf-8", external.as_deref().unwrap_or(INDEX))
+    let route = ROUTES.iter().find(|(prefix, ..)| path.starts_with(prefix));
+    let (code, ctype, body): (u16, &str, Vec<u8>) = if method != "GET" {
+        (405, "text/plain", b"method not allowed".to_vec())
+    } else if let Some((prefix, host, strip)) = route {
+        let upstream = if *strip { &path[prefix.len() - 1..] } else { path };
+        match fetch(host, upstream) {
+            Ok(body) => (200, "application/json; charset=utf-8", body),
+            Err(e) => (502, "text/plain", format!("upstream error: {e}").into_bytes()),
         }
-        _ => respond(&mut s, 404, "text/plain", b"not found"),
-    }
+    } else {
+        match path.split('?').next().unwrap_or("/") {
+            "/" | "/index.html" => {
+                // index.html next to the exe wins (easy to customize), else the embedded copy
+                let external = env::current_exe()
+                    .ok()
+                    .and_then(|p| fs::read(p.with_file_name("index.html")).ok());
+                (200, "text/html; charset=utf-8", external.unwrap_or_else(|| INDEX.to_vec()))
+            }
+            _ => (404, "text/plain", b"not found".to_vec()),
+        }
+    };
+
+    let result = respond(&mut s, code, ctype, &body);
+    log(format_args!(
+        "< {method} {path} -> {code}, {} bytes, {} ms",
+        body.len(),
+        t0.elapsed().as_millis()
+    ));
+    result
+}
+
+fn log(msg: std::fmt::Arguments) {
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let s = ms / 1000;
+    println!(
+        "{:02}:{:02}:{:02}.{:03} {}",
+        s / 3600 % 24,
+        s / 60 % 60,
+        s % 60,
+        ms % 1000,
+        msg
+    );
 }
 
 fn fetch(host: &str, path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let tcp = TcpStream::connect((host, 443))?;
+    let t0 = Instant::now();
+    log(format_args!("  > api {host} {path}"));
+    let r = fetch_inner(host, path);
+    match &r {
+        Ok(b) => log(format_args!(
+            "  < api {host} -> 200, {} bytes, {} ms",
+            b.len(),
+            t0.elapsed().as_millis()
+        )),
+        Err(e) => log(format_args!(
+            "  < api {host} -> {e}, {} ms",
+            t0.elapsed().as_millis()
+        )),
+    }
+    r
+}
+
+fn fetch_inner(host: &str, path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let addr = (host, 443)
+        .to_socket_addrs()?
+        .next()
+        .ok_or("dns: no address")?;
+    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
     tcp.set_read_timeout(Some(Duration::from_secs(20)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(20)))?;
     let mut tls = native_tls::TlsConnector::new()?.connect(host, tcp)?;

@@ -179,21 +179,25 @@ async function loadStations() {
               `&minLon=${b.getWest()}&maxLon=${b.getEast()}`;
   const sberUrl = `/sber/api/stations?bbox=${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
   const seq = ++fetchSeq;
+  // sber is secondary and can be slow — never let it delay the tbank render
+  const sberP = fetch(sberUrl, { signal: AbortSignal.timeout(8000) })
+    .then(r => r.json()).catch(() => null);
   try {
-    const [data, sber] = await Promise.all([
-      fetch(url).then(r => r.json()),
-      fetch(sberUrl).then(r => r.json()).catch(() => null), // sber is best-effort
-    ]);
+    const data = await fetch(url, { signal: AbortSignal.timeout(15000) }).then(r => r.json());
     if (seq !== fetchSeq || data.status !== "ok") return;
     stations = new Map(data.payload.map(s => [s.id, s]));
     for (const s of data.payload)
       Object.keys(s.statusByFuelType || {}).forEach(f => knownFuels.add(f));
-    attachSberPayments((sber && sber.stations) || []);
     renderFuelFilters();
     renderMarkers();
   } catch (e) {
     console.error("load failed", e);
+    return;
   }
+  const sber = await sberP;
+  if (seq !== fetchSeq || !sber) return;
+  attachSberPayments(sber.stations || []);
+  if (!(map._popup && map._popup.isOpen())) renderMarkers();
 }
 
 // tbank is the primary source; sber only contributes its last payment time,
