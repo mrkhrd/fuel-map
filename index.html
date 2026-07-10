@@ -80,6 +80,19 @@
   .pay-badge.two { border-radius: 9px; }
   .pay-badge .pay-sber { font-size: 9.5px; font-weight: 700; color: #1d9440; line-height: 1.2; }
   .pay-badge.stale .pay-sber { color: #8a8f96; }
+  .pay-badge .pay-fuels { display: flex; gap: 2px; margin-top: 2px; }
+  .pay-badge .fchip {
+    color: #fff; border-radius: 3px; padding: 0 3px;
+    font-size: 8.5px; font-weight: 700; line-height: 12px;
+  }
+
+  /* popup source sections */
+  .pp-src {
+    display: flex; align-items: center; gap: 5px;
+    font-weight: 700; font-size: 12px; color: #555;
+    margin: 8px 0 3px; padding-top: 6px; border-top: 1px solid #e8e8e8;
+  }
+  .pp-src-st { font-weight: 400; }
 
   .leaflet-control-attribution { font-size: 9px; opacity: .6; }
 </style>
@@ -129,6 +142,17 @@ const STATUS_TEXT = {
   no_data:         "нет данных",
 };
 const FUEL_LABEL = f => /^\d+$/.test(f) ? "АИ-" + f : f;
+
+// sber fuel/status dictionaries
+const SBER_FUEL_LABEL = { ai80: "АИ-80", ai92: "АИ-92", ai95: "АИ-95", ai98: "АИ-98",
+                          ai100: "АИ-100", ai98_100: "АИ-98/100", diesel: "ДТ",
+                          propane: "Пропан", methane: "Метан" };
+const SBER_FUEL_CHIP  = { ai80: "80", ai92: "92", ai95: "95", ai98: "98", ai100: "100",
+                          ai98_100: "98+", diesel: "ДТ", propane: "Газ", methane: "Мет" };
+const SBER_STATUS = { available:   ["есть топливо", "#2e9e44"],
+                      stale:       ["данные устарели", "#f2a516"],
+                      unavailable: ["нет топлива", "#d93838"],
+                      unknown:     ["нет данных", "#9aa0a6"] };
 
 const map = L.map("map").setView([60.0182, 30.4240], 12);
 map.attributionControl.setPrefix(false); // drop the "Leaflet" link, keep OSM credit
@@ -200,17 +224,20 @@ async function loadStations() {
   if (!(map._popup && map._popup.isOpen())) renderMarkers();
 }
 
-// tbank is the primary source; sber only contributes its last payment time,
-// matched to the nearest tbank station within 150 m
+// tbank is the primary source; sber stations are matched to the nearest
+// tbank station within 150 m and contribute payments + per-fuel availability
 function attachSberPayments(sberStations) {
-  const src = sberStations.filter(x => x.lastPaymentAt && x.location);
+  const src = sberStations.filter(x => x.location);
   for (const s of stations.values()) {
     let best = null, bestD = 0.15; // km
     for (const x of src) {
       const d = haversine(s, x.location);
       if (d < bestD) { bestD = d; best = x; }
     }
-    if (best) s.sberPayAt = best.lastPaymentAt;
+    if (best) {
+      s.sber = best;
+      s.sberPayAt = best.lastPaymentAt;
+    }
   }
 }
 
@@ -264,10 +291,29 @@ function popupHtml(s) {
 
   return `<div class="pp-name">${esc(s.name)}</div>` +
          `<div class="pp-addr">${esc(s.addr || "")}</div>` +
+         `<div class="pp-src">Т-Банк</div>` +
          fuels +
-         `<div class="pp-pay">💳 Оплата (Т-Банк): ${fmtPayTime(s.lastTransactionAt)}</div>` +
-         (s.sberPayAt ? `<div class="pp-pay">💳 Оплата (Сбер): ${fmtPayTime(s.sberPayAt)}</div>` : "") +
-         conf + selBtns;
+         `<div class="pp-pay">💳 Последняя оплата: ${fmtPayTime(s.lastTransactionAt)}</div>` +
+         conf +
+         sberSection(s) + selBtns;
+}
+
+function sberSection(s) {
+  const x = s.sber;
+  if (!x) return "";
+  const st = SBER_STATUS[x.availabilityStatus] || SBER_STATUS.unknown;
+  const ops = x.operationsCount
+    ? `<span class="muted"> · оплат: ${x.operationsCount}</span>` : "";
+  const fuels = (x.fuels || []).map(f => {
+    const fst = SBER_STATUS[f.availabilityStatus] || SBER_STATUS.unknown;
+    const lim = f.limitLiters ? ` <span class="muted">(до ${f.limitLiters} л)</span>` : "";
+    return `<div class="pp-fuel"><b>${SBER_FUEL_LABEL[f.type] || esc(f.type)}</b>` +
+           `<i class="dot" style="background:${fst[1]}"></i>${fst[0]}${lim}</div>`;
+  }).join("") || "<div class='muted'>нет данных по видам топлива</div>";
+  return `<div class="pp-src">Сбер <i class="dot" style="background:${st[1]}"></i>` +
+         `<span class="pp-src-st">${st[0]}</span>${ops}</div>` +
+         fuels +
+         `<div class="pp-pay">💳 Последняя оплата: ${fmtPayTime(x.lastPaymentAt)}</div>`;
 }
 
 window.setSel = function (id, role) {
@@ -344,16 +390,26 @@ function renderMarkers() {
       else m.togglePopup();
     });
 
-    if (s.lastTransactionAt || s.sberPayAt) {
+    const rows = [];
+    if (s.lastTransactionAt) rows.push(`💳 ${payShortRel(s.lastTransactionAt)}`);
+    if (s.sberPayAt) rows.push(`<div class="pay-sber">СБ ${payShortRel(s.sberPayAt)}</div>`);
+    // per-fuel chips from sber (only fuels with a definite status)
+    const chips = ((s.sber && s.sber.fuels) || [])
+      .filter(f => f.availabilityStatus && f.availabilityStatus !== "unknown");
+    if (chips.length) {
+      rows.push(`<div class="pay-fuels">` + chips.map(f =>
+        `<span class="fchip" style="background:${(SBER_STATUS[f.availabilityStatus] || SBER_STATUS.unknown)[1]}">` +
+        `${SBER_FUEL_CHIP[f.type] || esc(f.type)}</span>`).join("") + `</div>`);
+    }
+    if (rows.length) {
       const ref = s.lastTransactionAt || s.sberPayAt;
-      const age = Date.now() - new Date(ref).getTime();
-      let cls = age < 3 * 3600e3 ? " fresh" : age > 24 * 3600e3 ? " stale" : "";
-      let html = s.lastTransactionAt ? `💳 ${payShortRel(s.lastTransactionAt)}` : "";
-      if (s.sberPayAt) {
-        html += `<div class="pay-sber">СБ ${payShortRel(s.sberPayAt)}</div>`;
-        if (s.lastTransactionAt) cls += " two";
+      let cls = "";
+      if (ref) {
+        const age = Date.now() - new Date(ref).getTime();
+        cls = age < 3 * 3600e3 ? " fresh" : age > 24 * 3600e3 ? " stale" : "";
       }
-      m.bindTooltip(html, {
+      if (rows.length > 1) cls += " two";
+      m.bindTooltip(rows.join(""), {
         permanent: true, direction: "right", offset: [10, 0],
         className: "pay-badge" + cls,
       });
