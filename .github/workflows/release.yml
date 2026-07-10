@@ -62,9 +62,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,armv7-unknown-linux-musleabihf
       - uses: taiki-e/install-action@v2
         with:
-          tool: cross
+          tool: cargo-zigbuild
+      - uses: mlugg/setup-zig@v2
       - name: Cross-build static binaries (amd64, arm64, armv7)
         env:
           APP_VERSION: ${{ needs.version.outputs.tag }}
@@ -75,7 +78,7 @@ jobs:
             [linux/arm/v7]=armv7-unknown-linux-musleabihf
           )
           for p in "${!t[@]}"; do
-            cross build --release --target "${t[$p]}"
+            cargo zigbuild --release --target "${t[$p]}"
             mkdir -p "bin/$p"
             cp "target/${t[$p]}/release/fuel-host" "bin/$p/"
           done
