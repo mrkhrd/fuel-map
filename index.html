@@ -89,7 +89,8 @@
   .pay-badge .bank-line { display: flex; align-items: center; gap: 3px; line-height: 1.35; }
   .pay-badge .bpay { font-size: 10px; font-weight: 600; }
   .pay-badge .pay-sber { color: #1d9440; }
-  .pay-badge.stale .pay-sber { color: #8a8f96; }
+  .pay-badge .pay-alfa { color: #d43f3f; }
+  .pay-badge.stale .pay-sber, .pay-badge.stale .pay-alfa { color: #8a8f96; }
   .pay-badge .fsrc { font-size: 8px; font-weight: 700; color: #98a0a8; }
   .pay-badge .fchip {
     color: #fff; border-radius: 3px; padding: 0 3px;
@@ -164,9 +165,9 @@ const STATUS_COLOR = {
   no_data:         "#9aa0a6",
 };
 const STATUS_TEXT = {
-  available:       "есть топливо",
-  maybe_available: "возможно есть",
-  not_available:   "нет топлива",
+  available:       "есть",
+  maybe_available: "возможно",
+  not_available:   "нет",
   no_data:         "нет данных",
 };
 const FUEL_NAMES = { diesel: "ДТ", propane: "Пропан", methane: "Метан", "98/100": "АИ-98/100" };
@@ -193,10 +194,23 @@ const SBER_FUEL_LABEL = { ai80: "АИ-80", ai92: "АИ-92", ai95: "АИ-95", ai9
                           propane: "Пропан", methane: "Метан" };
 const SBER_FUEL_CHIP  = { ai80: "80", ai92: "92", ai95: "95", ai98: "98", ai100: "100",
                           ai98_100: "98+", diesel: "ДТ", propane: "Газ", methane: "Мет" };
-const SBER_STATUS = { available:   ["есть топливо", "#2e9e44"],
-                      stale:       ["данные устарели", "#f2a516"],
-                      unavailable: ["нет топлива", "#d93838"],
+const SBER_STATUS = { available:   ["есть", "#2e9e44"],
+                      stale:       ["устарело", "#f2a516"],
+                      unavailable: ["нет", "#d93838"],
                       unknown:     ["нет данных", "#9aa0a6"] };
+
+// alfa fuel/status dictionaries; statuses are per fuel, "closed" marks fuels
+// the station simply doesn't sell — those are skipped everywhere
+const ALFA_TO_FUEL = { AI92: "92", AI95: "95", AI98_100: "98/100", DIESEL: "diesel" };
+const ALFA_FUEL_LABEL = { AI92: "АИ-92", AI95: "АИ-95", AI98_100: "АИ-98/100", DIESEL: "ДТ" };
+const ALFA_FUEL_CHIP  = { AI92: "92", AI95: "95", AI98_100: "98+", DIESEL: "ДТ" };
+const ALFA_STATUS = { available:            ["есть", "#2e9e44"],
+                      probably_unavailable: ["возм. нет", "#f2a516"],
+                      unavailable:          ["нет", "#d93838"],
+                      unknown:              ["нет данных", "#9aa0a6"] };
+// like sber: alfa feeds the combined status only as positive evidence —
+// its "probably_unavailable" is often just old data and must not sink a station
+const ALFA_TO_STATUS = { available: "available" };
 
 // ---------- preferences (persisted across reloads) ----------
 const PREFS_KEY = "fuelmap.prefs";
@@ -264,15 +278,54 @@ let fetchSeq = 0;
 
 // ---------- data loading ----------
 
+// alfa has no bbox API — one country-wide blob (~3 MB gzip), cached for a while
+// and sliced by the visible area client-side
+let alfaAll = null, alfaAt = 0, alfaLoading = null;
+const ALFA_TTL = 5 * 60e3;
+function loadAlfa() {
+  if (alfaAll && Date.now() - alfaAt < ALFA_TTL) return Promise.resolve(alfaAll);
+  if (!alfaLoading)
+    alfaLoading = fetch("/alfa/api/v1/azs-stations/public/stations",
+                        { signal: AbortSignal.timeout(30000) })
+      .then(r => r.json())
+      .then(list => {
+        alfaAll = list.flatMap(s => {
+          const l = s.address && s.address.location;
+          if (!l || l.latitude == null) return [];
+          return [{ lat: l.latitude, lon: l.longitude,
+                    brand: (s.brand && s.brand.name) || "",
+                    fuels: (s.fuels || []).filter(f => f.status !== "closed") }];
+        });
+        alfaAt = Date.now();
+        return alfaAll;
+      })
+      .catch(() => alfaAll)   // keep the previous copy if the refresh fails
+      .finally(() => { alfaLoading = null; });
+  return alfaLoading;
+}
+
+// re-rendering clears all markers and would kill an open popup: clicking a
+// marker auto-pans the map, moveend refetches, and the popup vanished under
+// the user's cursor. Defer the render until the popup closes instead.
+let renderPending = false;
+function renderWhenIdle() {
+  if (map._popup && map._popup.isOpen()) { renderPending = true; return; }
+  renderMarkers();
+}
+map.on("popupclose", () => {
+  if (renderPending) { renderPending = false; setTimeout(renderMarkers, 0); }
+});
+
 async function loadStations() {
   const b = map.getBounds().pad(0.15);
   const url = `/api/v1/stations?minLat=${b.getSouth()}&maxLat=${b.getNorth()}` +
               `&minLon=${b.getWest()}&maxLon=${b.getEast()}`;
   const sberUrl = `/sber/api/stations?bbox=${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
   const seq = ++fetchSeq;
-  // sber is secondary and can be slow — never let it delay the tbank render
+  // sber/alfa are secondary and can be slow — never let them delay the tbank render
   const sberP = fetch(sberUrl, { signal: AbortSignal.timeout(8000) })
     .then(r => r.json()).catch(() => null);
+  const alfaP = loadAlfa();
   try {
     const data = await fetch(url, { signal: AbortSignal.timeout(15000) }).then(r => r.json());
     if (seq !== fetchSeq || data.status !== "ok") return;
@@ -280,21 +333,24 @@ async function loadStations() {
     for (const s of data.payload)
       Object.keys(s.statusByFuelType || {}).forEach(f => knownFuels.add(f));
     renderFuelFilters();
-    renderMarkers();
+    renderWhenIdle();
   } catch (e) {
     console.error("load failed", e);
     return;
   }
-  const sber = await sberP;
-  if (seq !== fetchSeq || !sber) return;
-  attachSberPayments(sber.stations || []);
-  for (const x of sber.stations || [])
-    for (const f of x.fuels || []) {
-      const k = SBER_TO_FUEL[f.type];
-      if (k) knownFuels.add(k);
-    }
+  const [sber, alfa] = await Promise.all([sberP, alfaP]);
+  if (seq !== fetchSeq || !(sber || alfa)) return;
+  if (sber) {
+    attachSberPayments(sber.stations || []);
+    for (const x of sber.stations || [])
+      for (const f of x.fuels || []) {
+        const k = SBER_TO_FUEL[f.type];
+        if (k) knownFuels.add(k);
+      }
+  }
+  if (alfa) attachAlfa(alfa);
   renderFuelFilters();
-  if (!(map._popup && map._popup.isOpen())) renderMarkers();
+  renderWhenIdle();
 }
 
 // tbank is the primary source; sber stations are matched to the nearest
@@ -314,6 +370,29 @@ function attachSberPayments(sberStations) {
   }
 }
 
+// same matching for alfa: nearest station within 150 m contributes per-fuel
+// status, prices and last-transaction times
+function attachAlfa(all) {
+  const b = map.getBounds().pad(0.15);
+  const src = all.filter(x => b.contains([x.lat, x.lon]));
+  for (const s of stations.values()) {
+    let best = null, bestD = 0.15; // km
+    for (const x of src) {
+      const d = haversine(s, x);
+      if (d < bestD) { bestD = d; best = x; }
+    }
+    if (best) {
+      s.alfa = best;
+      s.alfaPayAt = best.fuels.reduce((m, f) =>
+        f.last_transaction_at > (m || "") ? f.last_transaction_at : m, null);
+      for (const f of best.fuels) {
+        const k = ALFA_TO_FUEL[f.category];
+        if (k) knownFuels.add(k);
+      }
+    }
+  }
+}
+
 map.on("moveend", () => {
   clearTimeout(fetchTimer);
   fetchTimer = setTimeout(loadStations, 350);
@@ -326,24 +405,35 @@ function sberFuel(s, f) {
   return ((s.sber && s.sber.fuels) || []).find(x => SBER_TO_FUEL[x.type] === f);
 }
 
-// status is the OR (most positive) of tbank and sber
+// alfa fuel entry for a canonical fuel key, if the station is matched
+function alfaFuel(s, f) {
+  return ((s.alfa && s.alfa.fuels) || []).find(x => ALFA_TO_FUEL[x.category] === f);
+}
+
+// status is the OR (most positive) of tbank, sber and alfa
 function stationStatus(s) {
-  let t, b;
+  let t, b, a;
   if (fuelFilter === "all") {
     t = s.status || "no_data";
     b = SBER_TO_STATUS[s.sber && s.sber.availabilityStatus] || "no_data";
+    a = ((s.alfa && s.alfa.fuels) || []).some(f => ALFA_TO_STATUS[f.status] === "available")
+      ? "available" : "no_data";
   } else {
     t = (s.statusByFuelType || {})[fuelFilter] || "no_data";
     const f = sberFuel(s, fuelFilter);
     b = SBER_TO_STATUS[f && f.availabilityStatus] || "no_data";
+    const af = alfaFuel(s, fuelFilter);
+    a = ALFA_TO_STATUS[af && af.status] || "no_data";
   }
-  return STATUS_RANK[t] >= STATUS_RANK[b] ? t : b;
+  let best = t;
+  for (const x of [b, a]) if (STATUS_RANK[x] > STATUS_RANK[best]) best = x;
+  return best;
 }
 
 function stationPasses(s) {
   if (fuelFilter !== "all" &&
       (s.statusByFuelType || {})[fuelFilter] === undefined &&
-      !sberFuel(s, fuelFilter)) return false;
+      !sberFuel(s, fuelFilter) && !alfaFuel(s, fuelFilter)) return false;
   return statusFilter.has(stationStatus(s));
 }
 
@@ -382,9 +472,28 @@ function popupHtml(s) {
          `<div class="pp-addr">${esc(s.addr || "")}</div>` +
          `<div class="pp-src">Т-Банк</div>` +
          fuels +
-         `<div class="pp-pay">💳 Последняя оплата: ${fmtPayTime(s.lastTransactionAt)}</div>` +
+         `<div class="pp-pay">💳 Оплата: ${fmtPayTime(s.lastTransactionAt)}</div>` +
          conf +
-         sberSection(s) + selBtns;
+         sberSection(s) + alfaSection(s) + selBtns;
+}
+
+function alfaSection(s) {
+  const x = s.alfa;
+  if (!x || !x.fuels.length) return "";
+  const fuels = x.fuels.map(f => {
+    const st = ALFA_STATUS[f.status] || ALFA_STATUS.unknown;
+    const price = f.price ? ` <span class="muted">· ${f.price} ₽</span>` : "";
+    const lim = (f.restrictions || []).find(r => r.type === "limit" && r.payment_type === "card");
+    const limTxt = lim ? ` <span class="muted">(до ${lim.limit} л)</span>` : "";
+    // alfa is the only source with a payment time per fuel — show it on each line
+    const pay = f.last_transaction_at
+      ? ` <span class="muted">· 💳 ${payShortRel(f.last_transaction_at)}</span>` : "";
+    return `<div class="pp-fuel"><b>${ALFA_FUEL_LABEL[f.category] || esc(f.category)}</b>` +
+           `<i class="dot" style="background:${st[1]}"></i>${st[0]}${price}${pay}${limTxt}</div>`;
+  }).join("");
+  const brand = x.brand ? `<span class="pp-src-st muted">${esc(x.brand)}</span>` : "";
+  return `<div class="pp-src">Альфа ${brand}</div>` + fuels +
+         `<div class="pp-pay">💳 Оплата: ${fmtPayTime(s.alfaPayAt)}</div>`;
 }
 
 function sberSection(s) {
@@ -402,7 +511,7 @@ function sberSection(s) {
   return `<div class="pp-src">Сбер <i class="dot" style="background:${st[1]}"></i>` +
          `<span class="pp-src-st">${st[0]}</span>${ops}</div>` +
          fuels +
-         `<div class="pp-pay">💳 Последняя оплата: ${fmtPayTime(x.lastPaymentAt)}</div>`;
+         `<div class="pp-pay">💳 Оплата: ${fmtPayTime(x.lastPaymentAt)}</div>`;
 }
 
 window.setSel = function (id, role) {
@@ -452,6 +561,14 @@ function payShortRel(iso) {
   return `${Math.round(mins / 1440)} дн`;
 }
 
+// ultra-compact relative time for inside a fuel chip: 5м / 3ч / 2д
+function payChipRel(iso) {
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 60) return `${Math.max(mins, 0)}м`;
+  if (mins < 48 * 60) return `${Math.round(mins / 60)}ч`;
+  return `${Math.round(mins / 1440)}д`;
+}
+
 const ROLE_BADGE = { start: ["С", "#2e9e44"], middle: ["+", "#7b1fa2"], end: ["Ф", "#37474f"] };
 
 function renderMarkers() {
@@ -468,7 +585,7 @@ function renderMarkers() {
       weight: role ? 3 : 2,
       fillColor: STATUS_COLOR[st] || STATUS_COLOR.no_data,
       fillOpacity: 0.95,
-    }).bindPopup(() => popupHtml(s), { maxWidth: 280 })
+    }).bindPopup(() => popupHtml(s), { maxWidth: 340, minWidth: 240 })
       .addTo(markersLayer);
 
     // ctrl+click toggles selection silently; plain click opens the popup
@@ -500,8 +617,16 @@ function renderMarkers() {
     if (s.sber && s.sber.operationsCount)
       sPay += (sPay ? " · " : "") + `${s.sber.operationsCount} опл`;
     if (sPay || sFuels.length) rows.push(bankLine("С", sPay, "bpay pay-sber", sFuels));
+
+    // alfa chips carry their own payment time (95 3ч) — no row-level 💳 needed
+    const aFuels = ((s.alfa && s.alfa.fuels) || []).map(f =>
+      [(ALFA_FUEL_CHIP[f.category] || esc(f.category)) +
+       (f.last_transaction_at ? ` ${payChipRel(f.last_transaction_at)}` : ""),
+       (ALFA_STATUS[f.status] || ALFA_STATUS.unknown)[1]]);
+    if (aFuels.length) rows.push(bankLine("А", "", "bpay pay-alfa", aFuels));
+
     if (rows.length) {
-      const ref = s.lastTransactionAt || s.sberPayAt;
+      const ref = s.lastTransactionAt || s.sberPayAt || s.alfaPayAt;
       let cls = "";
       if (ref) {
         const age = Date.now() - new Date(ref).getTime();

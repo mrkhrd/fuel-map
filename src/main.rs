@@ -12,11 +12,22 @@ const DEFAULT_PORT: u16 = 8000;
 const INDEX: &[u8] = include_bytes!("../index.html");
 
 /// (url prefix, upstream host, strip prefix from forwarded path)
-const ROUTES: [(&str, &str, bool); 3] = [
+const ROUTES: [(&str, &str, bool); 4] = [
     ("/api/", "toplivo.tbank.ru", false),
     ("/sber/", "sberazs.ru", true),
+    ("/alfa/", "alfabank.ru", true),
     ("/osrm/", "router.project-osrm.org", true),
 ];
+
+// alfabank's bot filter returns 403 to anything that doesn't look like a real browser
+fn agent(host: &str) -> &'static str {
+    if host == "alfabank.ru" {
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+         (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+    } else {
+        "Mozilla/5.0 (fuel-map local proxy)"
+    }
+}
 
 // upstream address pins (like docker extra_hosts), set once from CLI args
 static PINS: OnceLock<HashMap<String, SocketAddr>> = OnceLock::new();
@@ -81,12 +92,16 @@ fn handle(mut s: TcpStream) -> io::Result<()> {
     log(format_args!("> {method} {path}"));
 
     let route = ROUTES.iter().find(|(prefix, ..)| path.starts_with(prefix));
+    let mut gzip = false;
     let (code, ctype, body): (u16, &str, Vec<u8>) = if method != "GET" {
         (405, "text/plain", b"method not allowed".to_vec())
     } else if let Some((prefix, host, strip)) = route {
         let upstream = if *strip { &path[prefix.len() - 1..] } else { path };
         match fetch(host, upstream) {
-            Ok(body) => (200, "application/json; charset=utf-8", body),
+            Ok((body, gz)) => {
+                gzip = gz;
+                (200, "application/json; charset=utf-8", body)
+            }
             Err(e) => (502, "text/plain", format!("upstream error: {e}").into_bytes()),
         }
     } else {
@@ -102,7 +117,7 @@ fn handle(mut s: TcpStream) -> io::Result<()> {
         }
     };
 
-    let result = respond(&mut s, code, ctype, &body);
+    let result = respond(&mut s, code, ctype, gzip, &body);
     log(format_args!(
         "< {method} {path} -> {code}, {} bytes, {} ms",
         body.len(),
@@ -127,14 +142,15 @@ fn log(msg: std::fmt::Arguments) {
     );
 }
 
-fn fetch(host: &str, path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn fetch(host: &str, path: &str) -> Result<(Vec<u8>, bool), Box<dyn std::error::Error>> {
     let t0 = Instant::now();
     log(format_args!("  > api {host} {path}"));
     let r = fetch_inner(host, path);
     match &r {
-        Ok(b) => log(format_args!(
-            "  < api {host} -> 200, {} bytes, {} ms",
+        Ok((b, gz)) => log(format_args!(
+            "  < api {host} -> 200, {} bytes{}, {} ms",
             b.len(),
+            if *gz { " (gzip)" } else { "" },
             t0.elapsed().as_millis()
         )),
         Err(e) => log(format_args!(
@@ -207,47 +223,97 @@ fn tls_connect(host: &str, tcp: TcpStream) -> Result<Box<dyn ReadWrite>, Box<dyn
     Ok(Box::new(rustls::StreamOwned::new(conn, tcp)))
 }
 
-fn fetch_inner(host: &str, path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let tcp = connect(host)?;
-    tcp.set_read_timeout(Some(Duration::from_secs(20)))?;
-    tcp.set_write_timeout(Some(Duration::from_secs(20)))?;
-    let mut tls = tls_connect(host, tcp)?;
+// header value from a response line, name compared case-insensitively
+fn header<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let (k, v) = line.split_once(':')?;
+    if k.trim().eq_ignore_ascii_case(name) { Some(v.trim()) } else { None }
+}
 
-    // HTTP/1.1 (tbank rejects 1.0 with 426); Connection: close delimits the body
-    write!(
-        tls,
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\n\
-         User-Agent: Mozilla/5.0 (fuel-map local proxy)\r\n\
-         Accept: application/json\r\nConnection: close\r\n\r\n"
-    )?;
+// "https://host/path" -> "/path" (Location headers come back absolute)
+fn url_path(url: &str) -> &str {
+    url.split_once("://")
+        .and_then(|(_, rest)| rest.find('/').map(|i| &rest[i..]))
+        .unwrap_or(url)
+}
 
-    let mut resp = Vec::new();
-    let mut buf = [0u8; 16384];
-    loop {
-        match tls.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => resp.extend_from_slice(&buf[..n]),
-            // some servers drop the link without close_notify — keep what we got
-            Err(_) if !resp.is_empty() => break,
-            Err(e) => return Err(e.into()),
+// Returns (body, was_gzip). Gzip is passed through to the browser undecoded —
+// alfabank's country-wide dump is 18 MB raw vs ~3 MB compressed.
+fn fetch_inner(host: &str, path: &str) -> Result<(Vec<u8>, bool), Box<dyn std::error::Error>> {
+    // alfabank fronts the API with a bot check: 307 to the same URL + session
+    // cookies; the retry with those cookies gets the data. Keep them per host.
+    static JAR: OnceLock<Mutex<HashMap<String, HashMap<String, String>>>> = OnceLock::new();
+    let jar = JAR.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let mut path = path.to_string();
+    for _ in 0..3 {
+        let tcp = connect(host)?;
+        tcp.set_read_timeout(Some(Duration::from_secs(20)))?;
+        tcp.set_write_timeout(Some(Duration::from_secs(20)))?;
+        let mut tls = tls_connect(host, tcp)?;
+
+        let cookie = jar.lock().unwrap().get(host).map(|m| {
+            let pairs: Vec<String> = m.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            format!("Cookie: {}\r\n", pairs.join("; "))
+        });
+        // HTTP/1.1 (tbank rejects 1.0 with 426); Connection: close delimits the body
+        write!(
+            tls,
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\n\
+             User-Agent: {}\r\nAccept: application/json\r\n\
+             Accept-Encoding: gzip\r\n{}Connection: close\r\n\r\n",
+            agent(host),
+            cookie.as_deref().unwrap_or("")
+        )?;
+
+        let mut resp = Vec::new();
+        let mut buf = [0u8; 16384];
+        loop {
+            match tls.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => resp.extend_from_slice(&buf[..n]),
+                // some servers drop the link without close_notify — keep what we got
+                Err(_) if !resp.is_empty() => break,
+                Err(e) => return Err(e.into()),
+            }
         }
-    }
 
-    let sep = resp
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or("bad upstream response")?;
-    let head = str::from_utf8(&resp[..sep]).unwrap_or("");
-    let code = head.split(' ').nth(1).unwrap_or("?");
-    if code != "200" {
-        return Err(format!("HTTP {code}").into());
+        let sep = resp
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .ok_or("bad upstream response")?;
+        let head = str::from_utf8(&resp[..sep]).unwrap_or("").to_string();
+        for line in head.lines() {
+            if let Some(v) = header(line, "set-cookie") {
+                if let Some((name, val)) = v.split(';').next().unwrap_or("").split_once('=') {
+                    jar.lock()
+                        .unwrap()
+                        .entry(host.to_string())
+                        .or_default()
+                        .insert(name.trim().to_string(), val.trim().to_string());
+                }
+            }
+        }
+
+        let code = head.split(' ').nth(1).unwrap_or("?");
+        if code.starts_with('3') {
+            if let Some(loc) = head.lines().find_map(|l| header(l, "location")) {
+                path = url_path(loc).to_string();
+                continue;
+            }
+        }
+        if code != "200" {
+            return Err(format!("HTTP {code}").into());
+        }
+        let lower = head.to_ascii_lowercase();
+        let body = &resp[sep + 4..];
+        let body = if lower.contains("transfer-encoding: chunked") {
+            dechunk(body)?
+        } else {
+            body.to_vec()
+        };
+        return Ok((body, lower.contains("content-encoding: gzip")));
     }
-    let body = &resp[sep + 4..];
-    if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
-        dechunk(body)
-    } else {
-        Ok(body.to_vec())
-    }
+    Err("redirect loop".into())
 }
 
 fn dechunk(mut b: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -268,7 +334,7 @@ fn dechunk(mut b: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     }
 }
 
-fn respond(s: &mut TcpStream, code: u16, ctype: &str, body: &[u8]) -> io::Result<()> {
+fn respond(s: &mut TcpStream, code: u16, ctype: &str, gzip: bool, body: &[u8]) -> io::Result<()> {
     let reason = match code {
         200 => "OK",
         404 => "Not Found",
@@ -277,9 +343,10 @@ fn respond(s: &mut TcpStream, code: u16, ctype: &str, body: &[u8]) -> io::Result
     };
     write!(
         s,
-        "HTTP/1.1 {code} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n\
+        "HTTP/1.1 {code} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n{}\
          Cache-Control: no-store\r\nConnection: close\r\n\r\n",
-        body.len()
+        body.len(),
+        if gzip { "Content-Encoding: gzip\r\n" } else { "" }
     )?;
     s.write_all(body)
 }
