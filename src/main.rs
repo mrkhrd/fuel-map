@@ -216,22 +216,46 @@ fn tls_connect(host: &str, tcp: TcpStream) -> Result<Box<dyn ReadWrite>, Box<dyn
     Ok(Box::new(native_tls::TlsConnector::new()?.connect(host, tcp)?))
 }
 
+// alfabank.ru's certificate chains to the Russian Trusted Root CA (Ministry of
+// Digital Development), which is not in the Mozilla bundle webpki-roots ships —
+// so on Linux the alfa source failed with UnknownIssuer, and in the scratch
+// container there is no OS trust store to fall back on. The root is public and
+// self-signed (alfabank serves it in its own chain); embedded here as DER.
+// SHA-256 D2:6D:2D:02:31:B7:C3:9F:92:CC:73:85:12:BA:54:10:35:19:E4:40:5D:68:B5:BD:70:3E:97:88:CA:8E:CF:31
+// It is added ONLY to the config used for alfabank.ru: the other upstreams keep
+// the stock roots, so this CA cannot vouch for tbank, sber or the router.
+#[cfg(not(windows))]
+const ALFA_ROOT_CA: &[u8] = include_bytes!("russian-trusted-root-ca.der");
+#[cfg(not(windows))]
+const ALFA_HOST: &str = "alfabank.ru";
+
 #[cfg(not(windows))]
 fn tls_connect(host: &str, tcp: TcpStream) -> Result<Box<dyn ReadWrite>, Box<dyn std::error::Error>> {
     use std::sync::Arc;
+    fn config(extra: Option<&'static [u8]>) -> Arc<rustls::ClientConfig> {
+        let mut roots = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        if let Some(der) = extra {
+            // a malformed embedded root would silently disable the source, so
+            // fail loudly at first use instead of retrying forever
+            roots
+                .add(rustls::pki_types::CertificateDer::from(der))
+                .expect("embedded alfabank root CA is not valid DER");
+        }
+        Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
+    }
     static CFG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    let cfg = CFG
-        .get_or_init(|| {
-            let roots = rustls::RootCertStore {
-                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-            };
-            Arc::new(
-                rustls::ClientConfig::builder()
-                    .with_root_certificates(roots)
-                    .with_no_client_auth(),
-            )
-        })
-        .clone();
+    static ALFA_CFG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    let cfg = if host == ALFA_HOST {
+        ALFA_CFG.get_or_init(|| config(Some(ALFA_ROOT_CA))).clone()
+    } else {
+        CFG.get_or_init(|| config(None)).clone()
+    };
     let name = rustls::pki_types::ServerName::try_from(host.to_string())?;
     let conn = rustls::ClientConnection::new(cfg, name)?;
     Ok(Box::new(rustls::StreamOwned::new(conn, tcp)))
