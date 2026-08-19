@@ -50,8 +50,11 @@
   /* popup */
   .pp-name { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
   .pp-addr { color: #666; font-size: 12px; margin-bottom: 6px; }
-  .pp-fuel { display: flex; align-items: center; gap: 6px; margin: 2px 0; font-size: 13px; }
+  /* alfa lines carry name + status + price + payment time + limit/disabled note;
+     wrap between those chunks, never inside one, or the text breaks mid-phrase */
+  .pp-fuel { display: flex; flex-wrap: wrap; align-items: center; gap: 1px 6px; margin: 2px 0; font-size: 13px; }
   .pp-fuel b { min-width: 46px; display: inline-block; }
+  .pp-fuel .muted { white-space: nowrap; }
   .pp-pay { margin-top: 6px; font-size: 12.5px; }
   .pp-conf { color: #888; font-size: 11.5px; margin-top: 2px; }
 
@@ -278,6 +281,26 @@ let fetchSeq = 0;
 
 // ---------- data loading ----------
 
+// tbank returns at most this many stations per bbox and offers no paging
+const TBANK_MAX = 300;
+let tbankCapped = false;
+
+// sber rejects a bbox whose side exceeds SBER_SPAN degrees or that leaves the
+// Web Mercator range — and it 400s with a message blaming Mercator either way.
+// Zoomed out, leaflet hands back lat past ±85 and lon past ±180 (world wrap),
+// so shrink the box around the map centre instead of firing a doomed request.
+const SBER_SPAN = 20;
+function sberBbox(b) {
+  const box = (lo, hi, lim) => {
+    const c = Math.max(-lim, Math.min(lim, (lo + hi) / 2));
+    const half = Math.min((hi - lo) / 2, SBER_SPAN / 2);
+    return [Math.max(-lim, c - half), Math.min(lim, c + half)];
+  };
+  const [s, n] = box(b.getSouth(), b.getNorth(), 85);
+  const [w, e] = box(b.getWest(), b.getEast(), 180);
+  return `${w},${s},${e},${n}`;
+}
+
 // alfa has no bbox API — one country-wide blob (~3 MB gzip), cached for a while
 // and sliced by the visible area client-side
 let alfaAll = null, alfaAt = 0, alfaLoading = null;
@@ -320,7 +343,7 @@ async function loadStations() {
   const b = map.getBounds().pad(0.15);
   const url = `/api/v1/stations?minLat=${b.getSouth()}&maxLat=${b.getNorth()}` +
               `&minLon=${b.getWest()}&maxLon=${b.getEast()}`;
-  const sberUrl = `/sber/api/stations?bbox=${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
+  const sberUrl = `/sber/api/stations?bbox=${sberBbox(b)}`;
   const seq = ++fetchSeq;
   // sber/alfa are secondary and can be slow — never let them delay the tbank render
   const sberP = fetch(sberUrl, { signal: AbortSignal.timeout(8000) })
@@ -329,6 +352,9 @@ async function loadStations() {
   try {
     const data = await fetch(url, { signal: AbortSignal.timeout(15000) }).then(r => r.json());
     if (seq !== fetchSeq || data.status !== "ok") return;
+    // tbank hard-caps a bbox response at TBANK_MAX with no paging — at that
+    // count the view is silently truncated, so say so instead of lying
+    tbankCapped = data.payload.length >= TBANK_MAX;
     stations = new Map(data.payload.map(s => [s.id, s]));
     for (const s of data.payload)
       Object.keys(s.statusByFuelType || {}).forEach(f => knownFuels.add(f));
@@ -477,19 +503,44 @@ function popupHtml(s) {
          sberSection(s) + alfaSection(s) + selBtns;
 }
 
+// alfa restrictions come from the benzuber partner and are scoped by payment
+// type: "all" covers every method, "card"/"mobile" only that one. The bulk are
+// payment_type "all" — matching only "card" (as this used to) hides ~9 in 10.
+const ALFA_PAY = { all: "", card: " картой", mobile: " в приложении" };
+// broadest first, so a fuel with several limits shows the one that applies most
+const ALFA_PAY_ORDER = ["all", "card", "mobile"];
+const alfaRestr = (f, type) => (f.restrictions || []).filter(r => r.type === type);
+const alfaBest = rs => ALFA_PAY_ORDER.map(p => rs.find(r => r.payment_type === p)).find(Boolean) || rs[0];
+
+function alfaLimit(f) {
+  // a limit on a payment method that is disabled anyway is noise — drop it
+  const off = new Set(alfaRestr(f, "disabled").map(r => r.payment_type));
+  const lims = alfaRestr(f, "limit").filter(r => r.limit && !off.has(r.payment_type) && !off.has("all"));
+  const r = alfaBest(lims);
+  return r ? ` <span class="muted">(до ${r.limit} л${ALFA_PAY[r.payment_type] || ""})</span>` : "";
+}
+function alfaDisabled(f) {
+  const dis = alfaRestr(f, "disabled");
+  if (!dis.length) return "";
+  // the feed repeats restrictions; dedupe so the text doesn't stutter
+  const how = dis.some(r => r.payment_type === "all") ? ""
+    : ALFA_PAY_ORDER.filter(p => dis.some(r => r.payment_type === p))
+        .map(p => ALFA_PAY[p].trim()).join(", ");
+  return ` <span class="muted">· оплата недоступна${how ? " " + how : ""}</span>`;
+}
+
 function alfaSection(s) {
   const x = s.alfa;
   if (!x || !x.fuels.length) return "";
   const fuels = x.fuels.map(f => {
     const st = ALFA_STATUS[f.status] || ALFA_STATUS.unknown;
     const price = f.price ? ` <span class="muted">· ${f.price} ₽</span>` : "";
-    const lim = (f.restrictions || []).find(r => r.type === "limit" && r.payment_type === "card");
-    const limTxt = lim ? ` <span class="muted">(до ${lim.limit} л)</span>` : "";
+    const limTxt = alfaLimit(f), disTxt = alfaDisabled(f);
     // alfa is the only source with a payment time per fuel — show it on each line
     const pay = f.last_transaction_at
       ? ` <span class="muted">· 💳 ${payShortRel(f.last_transaction_at)}</span>` : "";
     return `<div class="pp-fuel"><b>${ALFA_FUEL_LABEL[f.category] || esc(f.category)}</b>` +
-           `<i class="dot" style="background:${st[1]}"></i>${st[0]}${price}${pay}${limTxt}</div>`;
+           `<i class="dot" style="background:${st[1]}"></i>${st[0]}${price}${pay}${limTxt}${disTxt}</div>`;
   }).join("");
   const brand = x.brand ? `<span class="pp-src-st muted">${esc(x.brand)}</span>` : "";
   return `<div class="pp-src">Альфа ${brand}</div>` + fuels +
@@ -585,7 +636,7 @@ function renderMarkers() {
       weight: role ? 3 : 2,
       fillColor: STATUS_COLOR[st] || STATUS_COLOR.no_data,
       fillOpacity: 0.95,
-    }).bindPopup(() => popupHtml(s), { maxWidth: 340, minWidth: 240 })
+    }).bindPopup(() => popupHtml(s), { maxWidth: 400, minWidth: 260 })
       .addTo(markersLayer);
 
     // ctrl+click toggles selection silently; plain click opens the popup
@@ -651,7 +702,8 @@ function renderMarkers() {
     }
   }
   document.getElementById("stats").textContent =
-    `Загружено АЗС: ${stations.size}, показано: ${shown}`;
+    `Загружено АЗС: ${stations.size}, показано: ${shown}` +
+    (tbankCapped ? ` — лимит ${TBANK_MAX} АЗС на запрос, приблизьте карту` : "");
 }
 
 function renderFuelFilters() {

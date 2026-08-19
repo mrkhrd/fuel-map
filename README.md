@@ -33,11 +33,13 @@ build-rust.bat                        # → target\release\fuel-host.exe
 fuel-host.exe [порт] [host=ip ...]    # порт по умолчанию 8000
 ```
 
-`host=ip` закрепляет адрес внешнего API (аналог docker `extra_hosts`) — нужно
-для sberazs.ru, который переехал за DDoS-Guard и отдаёт JS-челлендж вместо JSON:
+`host=ip` закрепляет адрес внешнего API (аналог docker `extra_hosts`) — запасной
+вариант на случай, если DNS отдаёт нерабочий адрес. Сейчас всем трём источникам
+пин не нужен (sberazs.ru какое-то время жил за DDoS-Guard, но снова отвечает
+напрямую — старый пин `sberazs.ru=213.171.31.57` мёртв, не используйте его):
 
 ```
-fuel-host.exe 8000 sberazs.ru=213.171.31.57
+fuel-host.exe 8000 sberazs.ru=185.71.64.253
 ```
 
 Альтернативы: `python server.py` или PyInstaller-сборка `build.bat`
@@ -56,11 +58,12 @@ API нет CORS-заголовков). Для alfabank.ru прокси прох�
 версия зашита в бинарник и печатается при старте:
 
 ```
-docker run -d -p 8000:8000 --add-host sberazs.ru:213.171.31.57 ghcr.io/mrkhrd/fuel-map:latest
+docker run -d -p 8000:8000 ghcr.io/mrkhrd/fuel-map:latest
 docker run -d -p 8123:8123 ghcr.io/mrkhrd/fuel-map:latest 8123   # свой порт
 ```
 
-В compose пин задаётся через `extra_hosts: ["sberazs.ru:213.171.31.57"]`.
+При необходимости адрес пинится через `--add-host host:ip` (в compose —
+`extra_hosts: ["host:ip"]`), см. `host=ip` выше.
 
 ## Автозапуск на Windows
 
@@ -72,5 +75,8 @@ schtasks /Run /TN "fuel-map"
 
 ## Замечания
 
+- API Т-Банка отдаёт не более 300 АЗС на запрос и не умеет постраничность —
+  при сильном отдалении карта показывает лишь часть, об этом пишет строка
+  статистики в панели.
 - Публичный OSRM demo-сервер rate-limited; при недоступности маршрут строится по прямой.
 - Сервер без аутентификации и HTTPS — рассчитан на локальную сеть.

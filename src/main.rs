@@ -36,7 +36,7 @@ fn main() -> io::Result<()> {
     let usage = || -> ! {
         eprintln!(
             "usage: fuel-host [port] [host=ip ...]   (default port {DEFAULT_PORT}; \
-             host=ip pins an upstream address, e.g. sberazs.ru=213.171.31.57)"
+             host=ip pins an upstream address, e.g. sberazs.ru=185.71.64.253)"
         );
         std::process::exit(2);
     };
@@ -93,16 +93,20 @@ fn handle(mut s: TcpStream) -> io::Result<()> {
 
     let route = ROUTES.iter().find(|(prefix, ..)| path.starts_with(prefix));
     let mut gzip = false;
-    let (code, ctype, body): (u16, &str, Vec<u8>) = if method != "GET" {
-        (405, "text/plain", b"method not allowed".to_vec())
+    let (code, ctype, body): (u16, String, Vec<u8>) = if method != "GET" {
+        (405, "text/plain".into(), b"method not allowed".to_vec())
     } else if let Some((prefix, host, strip)) = route {
         let upstream = if *strip { &path[prefix.len() - 1..] } else { path };
         match fetch(host, upstream) {
-            Ok((body, gz)) => {
-                gzip = gz;
-                (200, "application/json; charset=utf-8", body)
+            // pass the upstream status and body through rather than flattening
+            // every failure to 502: these APIs explain themselves (sber answers
+            // a too-wide bbox with 400 + {"error":{"code":"invalid_bbox"}}), and
+            // that detail is what makes a broken map diagnosable from devtools
+            Ok(u) => {
+                gzip = u.gzip;
+                (u.code, u.ctype, u.body)
             }
-            Err(e) => (502, "text/plain", format!("upstream error: {e}").into_bytes()),
+            Err(e) => (502, "text/plain".into(), format!("upstream error: {e}").into_bytes()),
         }
     } else {
         match path.split('?').next().unwrap_or("/") {
@@ -111,13 +115,13 @@ fn handle(mut s: TcpStream) -> io::Result<()> {
                 let external = env::current_exe()
                     .ok()
                     .and_then(|p| fs::read(p.with_file_name("index.html")).ok());
-                (200, "text/html; charset=utf-8", external.unwrap_or_else(|| INDEX.to_vec()))
+                (200, "text/html; charset=utf-8".into(), external.unwrap_or_else(|| INDEX.to_vec()))
             }
-            _ => (404, "text/plain", b"not found".to_vec()),
+            _ => (404, "text/plain".into(), b"not found".to_vec()),
         }
     };
 
-    let result = respond(&mut s, code, ctype, gzip, &body);
+    let result = respond(&mut s, code, &ctype, gzip, &body);
     log(format_args!(
         "< {method} {path} -> {code}, {} bytes, {} ms",
         body.len(),
@@ -142,15 +146,24 @@ fn log(msg: std::fmt::Arguments) {
     );
 }
 
-fn fetch(host: &str, path: &str) -> Result<(Vec<u8>, bool), Box<dyn std::error::Error>> {
+/// What an upstream answered, forwarded to the browser as-is.
+struct Upstream {
+    code: u16,
+    ctype: String,
+    body: Vec<u8>,
+    gzip: bool,
+}
+
+fn fetch(host: &str, path: &str) -> Result<Upstream, Box<dyn std::error::Error>> {
     let t0 = Instant::now();
     log(format_args!("  > api {host} {path}"));
     let r = fetch_inner(host, path);
     match &r {
-        Ok((b, gz)) => log(format_args!(
-            "  < api {host} -> 200, {} bytes{}, {} ms",
-            b.len(),
-            if *gz { " (gzip)" } else { "" },
+        Ok(u) => log(format_args!(
+            "  < api {host} -> {}, {} bytes{}, {} ms",
+            u.code,
+            u.body.len(),
+            if u.gzip { " (gzip)" } else { "" },
             t0.elapsed().as_millis()
         )),
         Err(e) => log(format_args!(
@@ -161,8 +174,9 @@ fn fetch(host: &str, path: &str) -> Result<(Vec<u8>, bool), Box<dyn std::error::
     r
 }
 
-// DNS may return several addresses and some can be dead (sberazs.ru does this);
-// walk them all with a short timeout and remember the one that worked
+// All four upstreams currently resolve to a single address, but sberazs.ru has
+// handed back several (with dead ones among them) while it moved hosts; walk
+// them all with a short timeout and remember the one that worked.
 fn connect(host: &str) -> Result<TcpStream, Box<dyn std::error::Error>> {
     if let Some(addr) = PINS.get().and_then(|p| p.get(host)) {
         return Ok(TcpStream::connect_timeout(addr, Duration::from_secs(5))?);
@@ -236,9 +250,9 @@ fn url_path(url: &str) -> &str {
         .unwrap_or(url)
 }
 
-// Returns (body, was_gzip). Gzip is passed through to the browser undecoded —
-// alfabank's country-wide dump is 18 MB raw vs ~3 MB compressed.
-fn fetch_inner(host: &str, path: &str) -> Result<(Vec<u8>, bool), Box<dyn std::error::Error>> {
+// Gzip is passed through to the browser undecoded — alfabank's country-wide
+// dump is 21 MB raw vs ~3 MB compressed.
+fn fetch_inner(host: &str, path: &str) -> Result<Upstream, Box<dyn std::error::Error>> {
     // alfabank fronts the API with a bot check: 307 to the same URL + session
     // cookies; the retry with those cookies gets the data. Keep them per host.
     static JAR: OnceLock<Mutex<HashMap<String, HashMap<String, String>>>> = OnceLock::new();
@@ -294,16 +308,16 @@ fn fetch_inner(host: &str, path: &str) -> Result<(Vec<u8>, bool), Box<dyn std::e
             }
         }
 
-        let code = head.split(' ').nth(1).unwrap_or("?");
-        if code.starts_with('3') {
+        let status = head.split(' ').nth(1).unwrap_or("");
+        // 3xx with a Location is the alfabank bot check handing us cookies —
+        // retry the same URL with them (the loop cap stops a redirect cycle)
+        if status.starts_with('3') {
             if let Some(loc) = head.lines().find_map(|l| header(l, "location")) {
                 path = url_path(loc).to_string();
                 continue;
             }
         }
-        if code != "200" {
-            return Err(format!("HTTP {code}").into());
-        }
+        let code: u16 = status.parse().map_err(|_| "bad upstream status")?;
         let lower = head.to_ascii_lowercase();
         let body = &resp[sep + 4..];
         let body = if lower.contains("transfer-encoding: chunked") {
@@ -311,7 +325,12 @@ fn fetch_inner(host: &str, path: &str) -> Result<(Vec<u8>, bool), Box<dyn std::e
         } else {
             body.to_vec()
         };
-        return Ok((body, lower.contains("content-encoding: gzip")));
+        let ctype = head
+            .lines()
+            .find_map(|l| header(l, "content-type"))
+            .unwrap_or("application/json; charset=utf-8")
+            .to_string();
+        return Ok(Upstream { code, ctype, body, gzip: lower.contains("content-encoding: gzip") });
     }
     Err("redirect loop".into())
 }
@@ -337,10 +356,19 @@ fn dechunk(mut b: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 fn respond(s: &mut TcpStream, code: u16, ctype: &str, gzip: bool, body: &[u8]) -> io::Result<()> {
     let reason = match code {
         200 => "OK",
+        400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
-        _ => "Bad Gateway",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
+        502 => "Bad Gateway",
+        c if c < 400 => "OK",
+        _ => "Error",
     };
+    // the content type is echoed from the upstream — never let it break the head
+    let ctype: String = ctype.chars().filter(|c| *c != '\r' && *c != '\n').collect();
     write!(
         s,
         "HTTP/1.1 {code} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n{}\
