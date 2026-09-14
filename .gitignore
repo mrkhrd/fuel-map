@@ -8,3 +8,10 @@ target/
 
 __pycache__/
 *.pyc
+
+# collector (phase 0): history db + raw response archive
+fuel.db
+fuel.db-wal
+fuel.db-shm
+raw/
+collector.log
