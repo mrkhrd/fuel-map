@@ -22,6 +22,7 @@ DEFAULT_PORT = 8010
 
 STATUSES = ["available", "maybe_available", "not_available", "stale", "no_data", "closed"]
 MAX_RUNS = 400000       # guard: a wide window over months should not eat the box
+MAX_LIST_RUNS = 60000   # runs sent to the list view for one page of places
 
 
 def db():
@@ -147,20 +148,23 @@ def ep_places(c, q):
                "avail": "avail DESC"}.get(q.get("sort", ["name"])[0], "p.name"))
     rows = c.execute(sql, [f.frm, f.to] + rp + pp + [limit, offset]).fetchall()
     ids = [r["id"] for r in rows]
-    latest = {}
+    state = {}
     if ids:
-        # newest run per (place, source, fuel) inside the window
+        # every run in the window, not just the newest one per source+fuel: the
+        # list view draws these as a timeline, and keeping only the latest would
+        # render one run stretched over the whole window as if nothing had moved
         for r in c.execute(
                 "SELECT s.place_id, s.source, f.fuel, f.status, f.status_raw, f.price,"
                 " f.limit_l, f.reported_at, f.first_seen, f.last_seen"
                 " FROM fuel_state f JOIN station s ON s.id=f.station_id"
                 " WHERE s.place_id IN (%s) AND f.last_seen >= ? AND f.first_seen <= ?"
-                " ORDER BY f.last_seen" % holders(ids), ids + [f.frm, f.to]):
-            latest.setdefault(r["place_id"], {})[(r["source"], r["fuel"])] = dict(r)
+                " ORDER BY f.first_seen LIMIT ?" % holders(ids),
+                ids + [f.frm, f.to, MAX_LIST_RUNS]):
+            state.setdefault(r["place_id"], []).append(dict(r))
     out = []
     for r in rows:
         d = dict(r)
-        d["state"] = list((latest.get(r["id"]) or {}).values())
+        d["state"] = state.get(r["id"], [])
         out.append(d)
     total = c.execute("SELECT COUNT(*) FROM place p WHERE " + pw, pp).fetchone()[0]
     return {"places": out, "count": len(out), "placesTotal": total,

@@ -316,17 +316,25 @@ async function viewTimeline(view) {
 function segsFor(place, fuel, from, span) {
   const runs = place.state.filter(s => s.fuel === fuel)
                           .sort((a, b) => a.first_seen - b.first_seen);
+  // each source gets its own lane inside the track: they disagree often, and
+  // drawing them on top of each other would just show whichever came last
+  const srcs = [...new Set(runs.map(r => r.source))]
+    .sort((a, b) => SRC_ORDER.indexOf(a) - SRC_ORDER.indexOf(b));
+  const h = 100 / srcs.length;
   return runs.map(r => seg(r, from, span,
     `${STATUS_TEXT[r.status] || r.status} · ${SRC_TEXT[r.source] || r.source} · ` +
-    `${fmtTime(r.first_seen)}–${fmtTime(r.last_seen)}` + (r.price ? ` · ${r.price} ₽` : "")
+    `${fmtTime(r.first_seen)}–${fmtTime(r.last_seen)}` + (r.price ? ` · ${r.price} ₽` : ""),
+    `top:${srcs.indexOf(r.source) * h}%;height:${h}%`
   )).join("");
 }
 
-function seg(r, from, span, title) {
+const SRC_ORDER = ["tbank", "alfa", "sber"];
+
+function seg(r, from, span, title, extra) {
   const a = Math.max(r.first_seen, from), b = Math.min(r.last_seen, from + span);
   const left = Math.max(0, 100 * (a - from) / span);
   const w = Math.max(0.25, 100 * (b - a) / span);
-  return `<span class="seg" style="left:${left}%;width:${w}%;` +
+  return `<span class="seg" style="left:${left}%;width:${w}%;${extra || ""};` +
          `background:${color(r.status)}" title="${esc(title)}"></span>`;
 }
 
