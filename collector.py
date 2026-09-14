@@ -220,6 +220,31 @@ def poll_alfa(db, port):
 POLLS = {"tbank": poll_tbank, "sber": poll_sber, "alfa": poll_alfa}
 
 
+def run_import(db):
+    """Fold the cycle's polls into the history tables, in this process and on
+    this connection -- two writers on one SQLite file is the one thing worth
+    avoiding here.
+
+    Never fatal: collecting is the job that cannot be caught up later, parsing
+    is. If this throws, the raw bodies are still on disk and `python importer.py`
+    will replay them.
+    """
+    try:
+        import importer
+        st = importer.import_polls(db, verbose=False, reuse=True)
+        if not st:
+            return ""
+        out = " | +%d runs, +%d events" % (st["runs"], st["events"])
+        # linking is O(n^2) per source pair and only moves when a station the
+        # linker has never seen turns up, which after the first day is rare
+        if st["stations"]:
+            lk = importer.link_places(db, verbose=False)
+            out += ", +%d станций -> %d АЗС" % (st["stations"], lk["places"])
+        return out
+    except Exception as e:
+        return " | import FAILED %s: %s" % (type(e).__name__, e)
+
+
 def preflight(port):
     """Fail loudly on the wrong port. Another service answering 404 on /api/
     would otherwise look exactly like a week of successfully recorded nothing."""
@@ -270,14 +295,18 @@ def disk_report(db):
 def main():
     port = DEFAULT_PORT
     once = False
+    do_import = True
     for arg in sys.argv[1:]:
         if arg == "--once":
             once = True
             continue
+        if arg == "--no-import":
+            do_import = False
+            continue
         try:
             port = int(arg)
         except ValueError:
-            sys.exit("usage: python collector.py [proxy_port] [--once]")
+            sys.exit("usage: python collector.py [proxy_port] [--once] [--no-import]")
 
     preflight(port)
     os.makedirs(RAW_DIR, exist_ok=True)
@@ -286,7 +315,8 @@ def main():
     db.commit()
 
     log("collector phase 0 -- proxy %s, region %s" % (PROXY % port, REGION))
-    log("db %s, retention %d days" % (DB_PATH, RAW_RETENTION_DAYS))
+    log("db %s, retention %d days, import %s"
+        % (DB_PATH, RAW_RETENTION_DAYS, "on" if do_import else "off"))
     log(disk_report(db))
 
     due = dict.fromkeys(POLLS, 0.0)
@@ -296,12 +326,14 @@ def main():
             if time.time() >= next_prune:
                 prune(db)
                 next_prune = time.time() + PRUNE_EVERY
+            polled = False
             for source in sorted(due, key=due.get):
                 if time.time() < due[source]:
                     continue
                 t0 = time.time()
                 try:
                     summary = POLLS[source](db, port)
+                    polled = True
                 except Exception as e:
                     db.rollback()
                     summary = "FAILED %s: %s" % (type(e).__name__, e)
@@ -309,6 +341,11 @@ def main():
                 # schedule from finish, not from start, so a slow poll cannot
                 # queue up a backlog it will never work off
                 due[source] = time.time() + INTERVALS[source]
+            if polled and do_import:
+                t0 = time.time()
+                out = run_import(db)
+                if out:
+                    log("import%s (%.1fs)" % (out, time.time() - t0))
             if once:
                 log("done -- " + disk_report(db))
                 return

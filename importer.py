@@ -417,12 +417,22 @@ def station_ids(db):
     return {(s, e): i for i, s, e in db.execute("SELECT id, source, ext_id FROM station")}
 
 
-def import_polls(db, rebuild=False):
+# Open runs and station ids, kept alive between calls for a long-lived caller
+# (the collector imports every cycle). Rebuilding them means a GROUP BY over all
+# of fuel_state, which is free today and will not be after a few million rows.
+_CACHE = {}
+
+
+def import_polls(db, rebuild=False, verbose=True, reuse=False):
+    """Fold every unimported poll into the history tables. Returns a summary, or
+    None when there was nothing to do."""
+    say = log if verbose else (lambda *_: None)
     if rebuild:
-        log("rebuild: dropping derived tables")
+        say("rebuild: dropping derived tables")
         for t in DERIVED:
             db.execute("DROP TABLE IF EXISTS " + t)
         db.commit()
+        _CACHE.clear()
     db.executescript(SCHEMA)
     db.commit()
 
@@ -433,13 +443,17 @@ def import_polls(db, rebuild=False):
         " WHERE p.id > ? AND p.error IS NULL AND b.pruned = 0 ORDER BY p.id", (last,)
     ).fetchall()
     if not todo:
-        log("nothing to import (last poll %d)" % last)
-        return
+        say("nothing to import (last poll %d)" % last)
+        return None
 
-    ids = station_ids(db)
-    runs = Runs(db)
+    if reuse and "runs" in _CACHE:
+        ids, runs = _CACHE["ids"], _CACHE["runs"]
+    else:
+        ids, runs = station_ids(db), Runs(db)
+        if reuse:
+            _CACHE.update(ids=ids, runs=runs)
     t0 = time.time()
-    n_new = n_ev = n_run = 0
+    n_new = n_ev = n_run = n_skip = 0
     for i, (poll, source, at, rel) in enumerate(todo, 1):
         full = os.path.join(RAW_DIR, rel.replace("/", os.sep))
         try:
@@ -448,6 +462,7 @@ def import_polls(db, rebuild=False):
             records = PARSERS[source](body)
         except Exception as e:
             log("poll %d (%s): %s -- skipped" % (poll, source, e))
+            n_skip += 1
             continue
         for r in records:
             key = (source, r["ext_id"])
@@ -469,25 +484,28 @@ def import_polls(db, rebuild=False):
             for f in r["fuels"]:
                 n_run += runs.fuel_obs(sid, f, poll, at)
             for (fuel, kind, st, rep, text) in r["events"]:
-                db.execute(
+                # the same reported_at seen in 200 consecutive polls is one event
+                n_ev += db.execute(
                     "INSERT OR IGNORE INTO fuel_event (station_id, fuel, kind, status,"
                     " reported_at, text, seen_poll) VALUES (?,?,?,?,?,?,?)",
-                    (sid, fuel, kind, st, rep, text, poll))
-                n_ev += db.total_changes and 0 or 0
+                    (sid, fuel, kind, st, rep, text, poll)).rowcount
         db.execute("INSERT INTO import_state (k, v) VALUES ('last_poll', ?)"
                    " ON CONFLICT(k) DO UPDATE SET v=excluded.v", (str(poll),))
         if i % 25 == 0 or i == len(todo):
             db.commit()
-            log("  %d/%d polls" % (i, len(todo)))
+            if len(todo) > 25:
+                say("  %d/%d polls" % (i, len(todo)))
     db.commit()
-    n_ev = db.execute("SELECT COUNT(*) FROM fuel_event").fetchone()[0]
-    log("imported %d polls in %.1fs: %d new stations, %d runs written, %d events total"
-        % (len(todo), time.time() - t0, n_new, n_run, n_ev))
+    st = {"polls": len(todo), "skipped": n_skip, "stations": n_new,
+          "runs": n_run, "events": n_ev, "secs": time.time() - t0}
+    say("imported %d polls in %.1fs: %d new stations, %d runs written, %d new events"
+        % (st["polls"], st["secs"], st["stations"], st["runs"], st["events"]))
+    return st
 
 
 # ---------- identity ----------
 
-def link_places(db):
+def link_places(db, verbose=True):
     """Group provider records into real-world places.
 
     Two guards the map's live matcher does not have, and the reason a
@@ -573,8 +591,11 @@ def link_places(db):
     db.commit()
 
     multi = db.execute("SELECT COUNT(*) FROM place WHERE sources LIKE '%,%'").fetchone()[0]
-    log("linked %d records into %d places (%d multi-source, %d rejected on brand)"
-        % (len(rows), len(groups), multi, rejected))
+    if verbose:
+        log("linked %d records into %d places (%d multi-source, %d rejected on brand)"
+            % (len(rows), len(groups), multi, rejected))
+    return {"records": len(rows), "places": len(groups), "multi": multi,
+            "rejected": rejected}
 
 
 def main():
