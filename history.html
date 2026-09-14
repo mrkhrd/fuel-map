@@ -1,0 +1,617 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>История топлива — АЗС</title>
+<style>
+  :root {
+    --available: #2e9e44; --maybe_available: #f2a516; --not_available: #d93838;
+    --no_data: #c8ccd0; --stale: #b08a3e; --closed: #8a8f94;
+    --line: #e3e6ea; --blue: #1a73e8;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; font-size: 14px; color: #222; background: #f6f7f9; }
+
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+           background: #fff; border-bottom: 1px solid var(--line); flex: none; flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; white-space: nowrap; }
+  .tabs { display: flex; gap: 4px; }
+  .tab { border: 1px solid #cfd4da; background: #f6f7f9; border-radius: 999px;
+         padding: 4px 14px; cursor: pointer; font-size: 13px; }
+  .tab.active { background: var(--blue); border-color: var(--blue); color: #fff; }
+  .grow { flex: 1; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  aside { width: 264px; flex: none; background: #fff; border-right: 1px solid var(--line);
+          overflow-y: auto; padding: 12px; }
+  section { flex: 1; overflow-y: auto; padding: 12px 14px; min-width: 0; }
+
+  .fgroup { margin-bottom: 14px; }
+  .fgroup > b { display: block; font-size: 12px; text-transform: uppercase;
+                letter-spacing: .04em; color: #777; margin-bottom: 6px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .chip { border: 1px solid #cfd4da; background: #f6f7f9; color: #333; border-radius: 999px;
+          padding: 3px 10px; cursor: pointer; font-size: 12.5px; user-select: none; }
+  .chip.active { background: var(--blue); border-color: var(--blue); color: #fff; }
+  .chip.st.active { color: #fff; border-color: transparent; }
+  input[type=text], input[type=number], select, input[type=datetime-local] {
+    width: 100%; padding: 5px 7px; border: 1px solid #cfd4da; border-radius: 7px;
+    font: inherit; font-size: 13px; background: #fff; }
+  .two { display: flex; gap: 6px; }
+  /* datetime-local renders ~180px wide minimum: side by side they overflow the
+     panel and put a scrollbar under the whole sidebar */
+  .two.stack { flex-direction: column; }
+  .opt { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; margin: 4px 0; }
+  .opt input { accent-color: var(--blue); margin: 0; }
+  button.action { border: none; border-radius: 8px; padding: 7px 12px; cursor: pointer;
+                  font-size: 13px; font-weight: 600; background: var(--blue); color: #fff; }
+  button.action.secondary { background: #e8eaed; color: #333; }
+  .muted { color: #777; font-size: 12px; }
+
+  /* ---- timeline ---- */
+  .place { background: #fff; border: 1px solid var(--line); border-radius: 10px;
+           padding: 9px 11px; margin-bottom: 8px; cursor: pointer; }
+  .place:hover { border-color: #c3c9d0; }
+  .place-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .place-head b { font-size: 14px; }
+  .src { font-size: 10.5px; border-radius: 4px; padding: 1px 5px; background: #eef1f4;
+         color: #555; text-transform: uppercase; letter-spacing: .03em; }
+  .trow { display: flex; align-items: center; gap: 8px; margin-top: 5px; }
+  .tlabel { width: 62px; flex: none; font-size: 12px; color: #444; text-align: right; }
+  .tsrc { width: 42px; flex: none; }
+  /* segments are placed at their real position in the window, not stacked in
+     sequence: the striped track showing through is time nobody observed */
+  .track { flex: 1; height: 14px; border-radius: 4px; overflow: hidden; position: relative;
+           background: repeating-linear-gradient(90deg, #f0f2f4 0 6px, #e9ecef 6px 12px); }
+  .seg { position: absolute; top: 0; bottom: 0; min-width: 1px; }
+  .seg:hover { outline: 1px solid rgba(0,0,0,.35); outline-offset: -1px; }
+  .tnow { width: 74px; flex: none; font-size: 12px; text-align: right; white-space: nowrap; }
+
+  .axis { display: flex; justify-content: space-between; font-size: 11px; color: #888;
+          padding: 0 0 6px 70px; position: sticky; top: -12px; background: #f6f7f9; z-index: 2; }
+
+  /* ---- drawer ---- */
+  .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 620px; max-width: 94vw;
+            background: #fff; box-shadow: -4px 0 24px rgba(0,0,0,.18); z-index: 50;
+            display: flex; flex-direction: column; }
+  .drawer-head { padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex;
+                 align-items: flex-start; gap: 10px; }
+  .drawer-body { flex: 1; overflow-y: auto; padding: 12px 14px; }
+  .x { cursor: pointer; font-size: 22px; line-height: 1; color: #888; padding: 0 4px; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { text-align: left; padding: 4px 8px 4px 0; border-bottom: 1px solid #f0f2f4; vertical-align: top; }
+  th { color: #777; font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .03em; }
+  td.num, th.num { text-align: right; }
+  .bar { height: 9px; border-radius: 3px; background: var(--available); display: inline-block; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .warn { color: #b3261e; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 10px;
+          padding: 11px 13px; margin-bottom: 10px; }
+  .card > h3 { margin: 0 0 8px; font-size: 13px; }
+  .legend { display: flex; gap: 4px 12px; flex-wrap: wrap; font-size: 12px; color: #444; }
+  .legend span { display: inline-flex; align-items: center; gap: 4px; }
+  .empty { color: #777; text-align: center; padding: 40px 10px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>История топлива</h1>
+  <div class="tabs" id="tabs"></div>
+  <span class="grow"></span>
+  <span class="muted" id="summary"></span>
+  <button class="action secondary" id="reload">Обновить</button>
+</header>
+
+<main>
+  <aside>
+    <div class="fgroup">
+      <b>Период</b>
+      <div class="chips" id="rangeChips"></div>
+      <div class="two stack" style="margin-top:6px">
+        <input type="datetime-local" id="fromAt" title="начало">
+        <input type="datetime-local" id="toAt" title="конец">
+      </div>
+    </div>
+
+    <div class="fgroup"><b>Топливо</b><div class="chips" id="fuelChips"></div></div>
+    <div class="fgroup"><b>Статус</b><div class="chips" id="statusChips"></div></div>
+    <div class="fgroup"><b>Источник</b><div class="chips" id="sourceChips"></div></div>
+
+    <div class="fgroup">
+      <b>Бренд</b>
+      <select id="brand" multiple size="6"></select>
+    </div>
+
+    <div class="fgroup">
+      <b>Поиск</b>
+      <input type="text" id="q" placeholder="название или адрес">
+    </div>
+
+    <div class="fgroup">
+      <b>Цена, ₽</b>
+      <div class="two">
+        <input type="number" id="pmin" placeholder="от" step="0.01">
+        <input type="number" id="pmax" placeholder="до" step="0.01">
+      </div>
+    </div>
+
+    <div class="fgroup">
+      <b>Ещё</b>
+      <label class="opt"><input type="checkbox" id="dated">
+        только с отметкой времени по топливу</label>
+      <label class="opt"><input type="checkbox" id="changed">
+        только менявшиеся за период</label>
+      <label class="opt"><input type="checkbox" id="minsrc">
+        только во всех трёх источниках</label>
+      <div style="margin-top:6px">
+        <span class="muted">Сортировка</span>
+        <select id="sort">
+          <option value="name">по названию</option>
+          <option value="changes">по числу изменений</option>
+          <option value="recent">по свежести</option>
+          <option value="avail">по наличию</option>
+        </select>
+      </div>
+    </div>
+
+    <button class="action secondary" id="reset" style="width:100%">Сбросить фильтры</button>
+  </aside>
+
+  <section id="view"><div class="empty">Загрузка…</div></section>
+</main>
+
+<script>
+const STATUS_TEXT = {
+  available: "есть", maybe_available: "возможно", not_available: "нет",
+  no_data: "нет данных", stale: "устарело", closed: "не продаётся",
+};
+const SRC_TEXT = { tbank: "Т-Банк", sber: "Сбер", alfa: "Альфа" };
+const FUEL_NAMES = { diesel: "ДТ", propane: "Пропан", methane: "Метан", "98/100": "АИ-98/100" };
+const fuelLabel = f => FUEL_NAMES[f] || (/^\d+$/.test(f) ? "АИ-" + f : f);
+const color = st => `var(--${st in STATUS_TEXT ? st : "no_data"})`;
+
+const RANGES = [["1 ч", 1], ["6 ч", 6], ["24 ч", 24], ["3 дня", 72], ["7 дней", 168], ["всё", 0]];
+const TABS = [["timeline", "Лента"], ["stats", "Статистика"],
+              ["coverage", "Сбор данных"], ["links", "Связи"]];
+
+let meta = null;
+let tab = "timeline";
+const F = {                       // the whole filter state lives here
+  hours: 24, from: null, to: null,
+  fuels: new Set(), statuses: new Set(), sources: new Set(), brands: [],
+  q: "", pmin: "", pmax: "", dated: false, changed: false, minsrc: false, sort: "name",
+};
+
+// ---------- helpers ----------
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function fmtAge(ms) {
+  if (ms == null) return "—";
+  const m = Math.round(ms / 60000);
+  if (m < 60) return m + " мин";
+  if (m < 1440) return (m / 60).toFixed(m < 600 ? 1 : 0).replace(".", ",") + " ч";
+  return Math.round(m / 1440) + " дн";
+}
+const fmtTime = t => new Date(t).toLocaleString("ru-RU",
+  { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+const fmtClock = t => new Date(t).toLocaleTimeString("ru-RU",
+  { hour: "2-digit", minute: "2-digit" });
+
+function localInput(ms) {          // ms -> value for <input type=datetime-local>
+  const d = new Date(ms - new Date().getTimezoneOffset() * 60000);
+  return d.toISOString().slice(0, 16);
+}
+
+function window_() {
+  if (F.from && F.to) return [F.from, F.to];
+  const to = Date.now();
+  const from = F.hours ? to - F.hours * 3600e3 : (meta && meta.from) || to - 3600e3;
+  return [from, to];
+}
+
+function params(extra) {
+  const [from, to] = window_();
+  const p = new URLSearchParams({ from, to });
+  if (F.fuels.size) p.set("fuel", [...F.fuels].join(","));
+  if (F.statuses.size) p.set("status", [...F.statuses].join(","));
+  if (F.sources.size) p.set("source", [...F.sources].join(","));
+  if (F.brands.length) p.set("brand", F.brands.join(","));
+  if (F.q) p.set("q", F.q);
+  if (F.pmin) p.set("pmin", F.pmin);
+  if (F.pmax) p.set("pmax", F.pmax);
+  if (F.dated) p.set("dated", "1");
+  if (F.changed) p.set("changed", "1");
+  if (F.minsrc) p.set("minsrc", "3");
+  p.set("sort", F.sort);
+  for (const [k, v] of Object.entries(extra || {})) p.set(k, v);
+  return p;
+}
+
+const api = (name, extra) =>
+  fetch(`/api/${name}?${params(extra)}`).then(r => r.json());
+
+// ---------- filter UI ----------
+function chips(el, items, sel, onToggle, styled) {
+  el.innerHTML = "";
+  for (const [val, label] of items) {
+    const b = document.createElement("span");
+    b.className = "chip" + (styled ? " st" : "") + (sel.has(val) ? " active" : "");
+    b.textContent = label;
+    if (styled && sel.has(val)) b.style.background = color(val);
+    b.onclick = () => { onToggle(val); render(); };
+    el.appendChild(b);
+  }
+}
+
+function buildFilters() {
+  chips(document.getElementById("rangeChips"),
+        RANGES.map(([l, h]) => [h, l]), new Set([F.from ? -1 : F.hours]),
+        h => { F.hours = h; F.from = F.to = null;
+               document.getElementById("fromAt").value = "";
+               document.getElementById("toAt").value = ""; });
+  chips(document.getElementById("fuelChips"),
+        meta.fuels.map(f => [f, fuelLabel(f)]), F.fuels, v => toggle(F.fuels, v));
+  chips(document.getElementById("statusChips"),
+        meta.statuses.map(s => [s, STATUS_TEXT[s] || s]), F.statuses,
+        v => toggle(F.statuses, v), true);
+  chips(document.getElementById("sourceChips"),
+        meta.sources.map(s => [s, SRC_TEXT[s] || s]), F.sources, v => toggle(F.sources, v));
+
+  const b = document.getElementById("brand");
+  if (!b.options.length)
+    b.innerHTML = meta.brands.map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join("");
+}
+const toggle = (set, v) => set.has(v) ? set.delete(v) : set.add(v);
+
+// ---------- views ----------
+async function viewTimeline(view) {
+  const [from, to] = window_();
+  const d = await api("places", { limit: 150 });
+  if (!d.places.length)
+    return view.innerHTML = `<div class="empty">Ничего не найдено за период.<br>
+      <span class="muted">Собрано истории: ${meta.from ? fmtAge(Date.now() - meta.from) : "—"}</span></div>`;
+
+  const span = to - from;
+  const ticks = 6;
+  let html = `<div class="axis">` +
+    Array.from({ length: ticks + 1 }, (_, i) =>
+      `<span>${fmtClock(from + span * i / ticks)}</span>`).join("") + `</div>`;
+
+  for (const p of d.places) {
+    // group the runs of this place by fuel, keeping every source's opinion
+    const byFuel = {};
+    for (const s of p.state) (byFuel[s.fuel] ||= []).push(s);
+    const fuels = Object.keys(byFuel).sort(fuelSort);
+    html += `<div class="place" data-id="${p.id}">
+      <div class="place-head"><b>${esc(p.name || "без названия")}</b>
+        ${p.brand && p.brand !== p.name ? `<span class="muted">${esc(p.brand)}</span>` : ""}
+        <span class="grow"></span>
+        ${(p.sources || "").split(",").map(s =>
+          `<span class="src">${esc(SRC_TEXT[s] || s)}</span>`).join("")}</div>
+      <div class="muted">${esc(p.addr || "")}</div>`;
+    for (const f of fuels) {
+      const best = byFuel[f].slice().sort((a, b) => b.last_seen - a.last_seen)[0];
+      html += `<div class="trow"><span class="tlabel">${fuelLabel(f)}</span>
+        <span class="track">${segsFor(p, f, from, span)}</span>
+        <span class="tnow"><span class="dot" style="background:${color(best.status)}"></span>
+          ${best.reported_at ? fmtAge(Date.now() - best.reported_at) : "—"}</span></div>`;
+    }
+    html += `</div>`;
+  }
+  view.innerHTML = html;
+  view.querySelectorAll(".place").forEach(el =>
+    el.onclick = () => openPlace(+el.dataset.id));
+  document.getElementById("summary").textContent =
+    `${d.places.length} из ${d.placesTotal} АЗС`;
+}
+
+// the list endpoint returns the runs visible in the window; lay them out as
+// proportional segments. Unobserved time stays as the striped track underneath,
+// which is the honest rendering of "we did not look"
+function segsFor(place, fuel, from, span) {
+  const runs = place.state.filter(s => s.fuel === fuel)
+                          .sort((a, b) => a.first_seen - b.first_seen);
+  return runs.map(r => seg(r, from, span,
+    `${STATUS_TEXT[r.status] || r.status} · ${SRC_TEXT[r.source] || r.source} · ` +
+    `${fmtTime(r.first_seen)}–${fmtTime(r.last_seen)}` + (r.price ? ` · ${r.price} ₽` : "")
+  )).join("");
+}
+
+function seg(r, from, span, title) {
+  const a = Math.max(r.first_seen, from), b = Math.min(r.last_seen, from + span);
+  const left = Math.max(0, 100 * (a - from) / span);
+  const w = Math.max(0.25, 100 * (b - a) / span);
+  return `<span class="seg" style="left:${left}%;width:${w}%;` +
+         `background:${color(r.status)}" title="${esc(title)}"></span>`;
+}
+
+const fuelSort = (a, b) => {
+  const na = /^\d/.test(a), nb = /^\d/.test(b);
+  if (na && nb) return parseInt(a) - parseInt(b);
+  if (na !== nb) return na ? -1 : 1;
+  return a.localeCompare(b);
+};
+
+async function viewStats(view) {
+  const d = await api("stats");
+  const [from, to] = window_();
+  const table = (title, rows, label) => `<div class="card"><h3>${title}</h3><table>
+    <tr><th>${label}</th><th class="num">АЗС</th><th class="num">интервалов</th>
+        <th class="num">«есть», %</th><th style="width:36%"></th></tr>` +
+    rows.filter(r => r.key).map(r => `<tr><td>${esc(fuelLabel(r.key))}</td>
+      <td class="num">${r.places}</td><td class="num">${r.runs}</td>
+      <td class="num">${r.pct == null ? "—" : r.pct}</td>
+      <td><span class="bar" style="width:${r.pct || 0}%"></span></td></tr>`).join("") +
+    `</table></div>`;
+
+  let html = "";
+  if (d.truncated) html += `<div class="card warn">Показана только часть данных
+    (${d.runs} интервалов) — сузьте период или фильтры.</div>`;
+  html += chart(d, from, to);
+  html += table("По топливу", d.byFuel, "топливо");
+  html += table("По бренду", d.byBrand.slice(0, 25), "бренд");
+  html += table("По источнику", d.bySource.map(r =>
+    ({ ...r, key: SRC_TEXT[r.key] || r.key })), "источник");
+  view.innerHTML = html;
+  document.getElementById("summary").textContent = `${d.runs} интервалов`;
+}
+
+// availability over time, one line per fuel, drawn as plain SVG
+function chart(d, from, to) {
+  const fuels = Object.keys(d.series).sort(fuelSort);
+  if (!fuels.length) return `<div class="card"><h3>Наличие во времени</h3>
+    <div class="muted">нет данных за период</div></div>`;
+  const W = 900, H = 180, pad = 26;
+  const x = i => pad + (W - pad * 2) * i / Math.max(1, d.points.length - 1);
+  const y = v => H - pad - (H - pad * 2) * v;
+  const palette = ["#1a73e8", "#2e9e44", "#d93838", "#f2a516", "#8e24aa", "#00838f"];
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:${H}px">`;
+  for (let g = 0; g <= 4; g++)
+    svg += `<line x1="${pad}" x2="${W - pad}" y1="${y(g / 4)}" y2="${y(g / 4)}"
+             stroke="#eceff2"/><text x="2" y="${y(g / 4) + 4}" font-size="10"
+             fill="#999">${g * 25}%</text>`;
+  // instants nobody observed break the line rather than reading as 0% -- the
+  // window runs to now, the last poll does not
+  fuels.forEach((f, i) => {
+    let path = "", pen = false;
+    d.series[f].forEach((p, j) => {
+      if (!p[1]) { pen = false; return; }
+      path += `${pen ? "L" : "M"}${x(j).toFixed(1)},${y(p[0] / p[1]).toFixed(1)} `;
+      pen = true;
+    });
+    if (path) svg += `<path d="${path}" fill="none" stroke="${palette[i % 6]}"
+             stroke-width="1.8" stroke-linejoin="round"/>`;
+  });
+  svg += `<text x="${pad}" y="${H - 6}" font-size="10" fill="#999">${fmtTime(from)}</text>
+          <text x="${W - pad}" y="${H - 6}" font-size="10" fill="#999"
+                text-anchor="end">${fmtTime(to)}</text></svg>`;
+  return `<div class="card"><h3>Доля АЗС с топливом</h3>${svg}
+    <div class="legend">${fuels.map((f, i) =>
+      `<span><span class="dot" style="background:${palette[i % 6]}"></span>
+       ${fuelLabel(f)}</span>`).join("")}</div></div>`;
+}
+
+async function viewCoverage(view) {
+  const d = await api("coverage");
+  let html = `<div class="card"><h3>Опросы за период</h3><table>
+    <tr><th>источник</th><th class="num">запросов</th><th class="num">ошибок</th>
+        <th class="num">потолок</th><th class="num">тел</th>
+        <th class="num">ср. время</th><th class="num">объём</th></tr>` +
+    d.bySource.map(r => `<tr><td>${esc(SRC_TEXT[r.source] || r.source)}</td>
+      <td class="num">${r.polls}</td>
+      <td class="num ${r.failed ? "warn" : ""}">${r.failed}</td>
+      <td class="num">${r.capped}</td><td class="num">${r.bodies}</td>
+      <td class="num">${Math.round(r.avg_ms)} мс</td>
+      <td class="num">${(r.bytes / 1e6).toFixed(1)} МБ</td></tr>`).join("") +
+    `</table><div class="muted" style="margin-top:6px">
+      на диске ${d.bodies} тел, ${(d.diskBytes / 1e6).toFixed(1)} МБ</div></div>`;
+
+  html += `<div class="card"><h3>Пропуски</h3>` + (d.gaps.length
+    ? `<table><tr><th>источник</th><th>с</th><th>по</th><th class="num">длина</th></tr>` +
+      d.gaps.map(g => `<tr><td>${esc(SRC_TEXT[g.source] || g.source)}</td>
+        <td>${fmtTime(g.from)}</td><td>${fmtTime(g.to)}</td>
+        <td class="num warn">${fmtAge(g.ms)}</td></tr>`).join("") + `</table>`
+    : `<div class="muted">пропусков нет</div>`) + `</div>`;
+
+  html += `<div class="card"><h3>Последние запросы</h3><table>
+    <tr><th>время</th><th>источник</th><th>тайл</th><th class="num">АЗС</th>
+        <th class="num">мс</th><th></th></tr>` +
+    d.polls.slice(0, 120).map(p => `<tr><td>${fmtTime(p.started_at)}</td>
+      <td>${esc(SRC_TEXT[p.source] || p.source)}</td>
+      <td class="muted">${esc(p.tile || "—")}</td>
+      <td class="num">${p.station_count ?? "—"}</td>
+      <td class="num">${p.duration_ms}</td>
+      <td class="${p.error ? "warn" : "muted"}">${p.error ? esc(p.error)
+        : p.capped ? "потолок 300" : ""}</td></tr>`).join("") + `</table></div>`;
+  view.innerHTML = html;
+  document.getElementById("summary").textContent = `${d.polls.length} запросов`;
+}
+
+async function viewLinks(view) {
+  const d = await fetch("/api/links").then(r => r.json());
+  const max = Math.max(...d.hist.map(h => h.n), 1);
+  let html = `<div class="card"><h3>Сопоставление записей</h3>
+    <div class="muted">${d.total} АЗС, из них ${d.multi} собраны из нескольких источников.
+    Совпадение требует, чтобы каждая запись была ближайшей для другой (взаимно),
+    и чтобы бренды не противоречили — проверка бренда включается дальше 40 м,
+    ближе этого геометрия надёжнее вывески.</div>
+    <table style="margin-top:8px"><tr><th>расстояние</th><th class="num">записей</th><th></th></tr>` +
+    d.hist.map(h => `<tr><td>${h.bucket}–${h.bucket + 10} м</td>
+      <td class="num">${h.n}</td><td style="width:60%">
+      <span class="bar" style="width:${100 * h.n / max}%;background:#1a73e8"></span></td></tr>`).join("") +
+    `</table></div>`;
+
+  html += `<div class="card"><h3>Самые дальние связи</h3><table>
+    <tr><th>расст.</th><th>источник</th><th>запись</th><th>бренд</th>
+        <th>АЗС</th><th>источники</th></tr>` +
+    d.stations.filter(s => s.link_dist_m != null).slice(0, 60).map(s =>
+      `<tr><td class="${s.link_dist_m > 100 ? "warn" : ""}">${Math.round(s.link_dist_m)} м</td>
+        <td>${esc(SRC_TEXT[s.source] || s.source)}</td>
+        <td>${esc(s.name || "—")}</td>
+        <td class="${s.brand_match === 0 ? "warn" : ""}">${esc(s.brand || "—")}</td>
+        <td>${esc(s.place_name || "—")}</td>
+        <td class="muted">${esc(s.sources || "")}</td></tr>`).join("") + `</table></div>`;
+  view.innerHTML = html;
+  document.getElementById("summary").textContent = `${d.multi} из ${d.total} сводных`;
+}
+
+// ---------- drawer ----------
+async function openPlace(id) {
+  document.querySelectorAll(".drawer").forEach(e => e.remove());
+  const d = await api("timeline", { place: id });
+  const [from, to] = window_(), span = to - from;
+  const el = document.createElement("div");
+  el.className = "drawer";
+
+  const byKey = {};
+  for (const r of d.runs) (byKey[r.fuel + "|" + r.source] ||= []).push(r);
+  const keys = Object.keys(byKey).sort((a, b) =>
+    fuelSort(a.split("|")[0], b.split("|")[0]) || a.localeCompare(b));
+
+  const rows = keys.map(k => {
+    const [fuel, source] = k.split("|");
+    const segs = byKey[k].map(r => seg(r, from, span,
+      `${STATUS_TEXT[r.status] || r.status} (${r.status_raw || "—"}) ` +
+      `${fmtTime(r.first_seen)}–${fmtTime(r.last_seen)}` +
+      (r.price ? ` · ${r.price} ₽` : "") +
+      (r.reported_at ? ` · отмечено ${fmtTime(r.reported_at)}` : " · без отметки"))).join("");
+    const last = byKey[k][byKey[k].length - 1];
+    return `<div class="trow"><span class="tlabel">${fuelLabel(fuel)}</span>
+      <span class="tsrc muted">${esc(SRC_TEXT[source] || source)}</span>
+      <span class="track">${segs}</span>
+      <span class="tnow">${last.price ? last.price + " ₽" : ""}</span></div>`;
+  }).join("");
+
+  const payments = d.events.filter(e => e.kind === "payment");
+  const reports = d.events.filter(e => e.kind !== "payment");
+  const evTable = (title, list, showFuel) => `<div class="card"><h3>${title}
+    <span class="muted">${list.length}</span></h3>` + (list.length
+      ? `<table><tr><th>время</th><th>источник</th>${showFuel ? "<th>топливо</th>" : ""}
+         <th>что</th></tr>` + list.slice(0, 60).map(e => `<tr>
+         <td>${fmtTime(e.reported_at)}</td>
+         <td>${esc(SRC_TEXT[e.source] || e.source)}</td>
+         ${showFuel ? `<td>${e.fuel ? fuelLabel(e.fuel) : "—"}</td>` : ""}
+         <td>${e.status ? `<span class="dot" style="background:${color(e.status)}"></span> ` : ""}
+             ${esc(e.text || STATUS_TEXT[e.status] || e.kind)}</td></tr>`).join("") + `</table>`
+      : `<div class="muted">нет</div>`) + `</div>`;
+
+  el.innerHTML = `<div class="drawer-head">
+      <div><b>${esc(d.place.name || "без названия")}</b>
+        <div class="muted">${esc(d.place.addr || "")}</div></div>
+      <span class="grow"></span><span class="x">×</span></div>
+    <div class="drawer-body">
+      <div class="card"><h3>Наличие по источникам</h3>
+        <div class="axis" style="padding-left:104px;position:static">
+          ${[0, 1, 2, 3, 4].map(i => `<span>${fmtClock(from + span * i / 4)}</span>`).join("")}
+        </div>${rows || '<div class="muted">нет интервалов за период</div>'}</div>
+      <div class="card"><h3>Записи источников</h3><table>
+        <tr><th>источник</th><th>идентификатор</th><th>бренд</th>
+            <th class="num">связь</th></tr>` +
+        d.stations.map(s => `<tr><td>${esc(SRC_TEXT[s.source] || s.source)}</td>
+          <td class="muted">${esc(s.ext_id)}</td><td>${esc(s.brand || s.name || "—")}</td>
+          <td class="num">${s.link_dist_m == null ? "—"
+            : Math.round(s.link_dist_m) + " м"}</td></tr>`).join("") + `</table></div>
+      ${evTable("Оплаты", payments, true)}
+      ${evTable("Сообщения о топливе", reports, true)}
+    </div>`;
+  el.querySelector(".x").onclick = () => el.remove();
+  document.body.appendChild(el);
+}
+
+// ---------- wiring ----------
+const VIEWS = { timeline: viewTimeline, stats: viewStats,
+                coverage: viewCoverage, links: viewLinks };
+
+let renderSeq = 0;
+async function render() {
+  buildFilters();
+  const view = document.getElementById("view");
+  const seq = ++renderSeq;
+  view.style.opacity = .55;
+  try {
+    await VIEWS[tab](view);
+  } catch (e) {
+    view.innerHTML = `<div class="empty warn">Ошибка: ${esc(e.message)}</div>`;
+  }
+  if (seq === renderSeq) view.style.opacity = 1;
+}
+
+function buildTabs() {
+  const el = document.getElementById("tabs");
+  el.innerHTML = "";
+  for (const [id, label] of TABS) {
+    const b = document.createElement("span");
+    b.className = "tab" + (tab === id ? " active" : "");
+    b.textContent = label;
+    b.onclick = () => {
+      document.querySelectorAll(".drawer").forEach(x => x.remove());
+      tab = id; buildTabs(); render();
+    };
+    el.appendChild(b);
+  }
+}
+
+function bind() {
+  const on = (id, ev, fn) => document.getElementById(id).addEventListener(ev, fn);
+  let t;
+  const debounced = () => { clearTimeout(t); t = setTimeout(render, 350); };
+  on("q", "input", e => { F.q = e.target.value; debounced(); });
+  on("pmin", "input", e => { F.pmin = e.target.value; debounced(); });
+  on("pmax", "input", e => { F.pmax = e.target.value; debounced(); });
+  for (const k of ["dated", "changed", "minsrc"])
+    on(k, "change", e => { F[k] = e.target.checked; render(); });
+  on("sort", "change", e => { F.sort = e.target.value; render(); });
+  on("brand", "change", e => {
+    F.brands = [...e.target.selectedOptions].map(o => o.value); render();
+  });
+  for (const k of ["fromAt", "toAt"])
+    on(k, "change", () => {
+      const a = document.getElementById("fromAt").value;
+      const b = document.getElementById("toAt").value;
+      if (a && b) { F.from = +new Date(a); F.to = +new Date(b); F.hours = -1; render(); }
+    });
+  on("reload", "click", () => load());
+  on("reset", "click", () => {
+    F.fuels.clear(); F.statuses.clear(); F.sources.clear();
+    Object.assign(F, { brands: [], q: "", pmin: "", pmax: "", dated: false,
+                       changed: false, minsrc: false, sort: "name", hours: 24,
+                       from: null, to: null });
+    document.querySelectorAll("aside input").forEach(i =>
+      i.type === "checkbox" ? (i.checked = false) : (i.value = ""));
+    document.getElementById("brand").selectedIndex = -1;
+    document.getElementById("sort").value = "name";
+    render();
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") document.querySelectorAll(".drawer").forEach(x => x.remove());
+  });
+}
+
+async function load() {
+  meta = await fetch("/api/meta").then(r => r.json());
+  if (!meta.runs) {
+    document.getElementById("view").innerHTML =
+      `<div class="empty">История пуста.<br><span class="muted">
+       Запустите collector.py, затем importer.py.</span></div>`;
+    return;
+  }
+  // a 24 h window over 20 minutes of history is a sliver against empty track;
+  // start zoomed to what actually exists until there is a day of it
+  if (meta.from && Date.now() - meta.from < 2 * 3600e3) F.hours = 0;
+  const [from, to] = window_();
+  document.getElementById("fromAt").placeholder = localInput(from);
+  document.getElementById("toAt").placeholder = localInput(to);
+  render();
+}
+
+buildTabs();
+bind();
+load();
+</script>
+</body>
+</html>
