@@ -32,6 +32,9 @@
   }
   .chip.active { background: #1a73e8; border-color: #1a73e8; color: #fff; }
 
+  #ageRange { flex: 1; min-width: 100px; accent-color: #1a73e8; margin: 0; }
+  #ageLabel { font-size: 13px; white-space: nowrap; }
+
   button.action {
     border: none; border-radius: 8px; padding: 7px 12px; cursor: pointer;
     font-size: 13px; font-weight: 600; background: #1a73e8; color: #fff;
@@ -140,6 +143,12 @@
     <button class="chip active" data-status="not_available"><i class="dot" style="background:#d93838"></i> нет</button>
     <button class="chip active" data-status="no_data"><i class="dot" style="background:#9aa0a6"></i> нет данных</button>
   </div>
+  <div class="row" id="ageFilter">
+    <span class="muted">Не старше:</span>
+    <input type="range" id="ageRange" min="0" max="24" step="1" value="0"
+           title="давность данных по выбранному топливу, шаг 30 мин">
+    <b id="ageLabel"></b>
+  </div>
   <div class="row">
     <button class="action" id="routeBtn">Маршрут по видимым АЗС</button>
     <button class="action secondary" id="clearRouteBtn" style="display:none">Сбросить</button>
@@ -227,7 +236,7 @@ let trackMe = !!prefs.track;
 function savePrefs() {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify({
-      fuel: fuelFilter, statuses: [...statusFilter],
+      fuel: fuelFilter, statuses: [...statusFilter], maxAge,
       collapsed, autoRefresh, track: trackMe,
     }));
   } catch (e) {}
@@ -247,6 +256,10 @@ const routeLayer = L.layerGroup().addTo(map);
 
 let stations = new Map();   // id -> station
 let fuelFilter = prefs.fuel || "all";
+// max age of the evidence, in minutes (0 = off); slider steps are 30 min
+const MAX_AGE_STEP = 30, MAX_AGE_STEPS = 24;
+let maxAge = Number.isFinite(prefs.maxAge) ? prefs.maxAge : 0;
+maxAge = Math.min(Math.max(Math.round(maxAge / MAX_AGE_STEP), 0), MAX_AGE_STEPS) * MAX_AGE_STEP;
 // visible statuses; an empty saved set falls back to "all" — restoring a blank map helps nobody
 const savedStatuses = Array.isArray(prefs.statuses)
   ? prefs.statuses.filter(s => STATUS_COLOR[s]) : [];
@@ -456,10 +469,62 @@ function stationStatus(s) {
   return best;
 }
 
+// tbank reports individual fuel sightings in recentEvents
+// ({ type: "fuel", fuelType, status, lastUpdatedAt }) — when present that, and
+// not the station's payment time, is when this fuel itself was last seen.
+// Returns the newest one as { at, status }, optionally only among those that
+// reported `status`: a sighting dates the verdict it carries and no other, so
+// "нет АИ-95" 47 минут назад is no evidence that there is АИ-95 now.
+function tbankFuelEvent(s, fuel, status) {
+  let best = null;
+  for (const e of s.recentEvents || []) {
+    if (e.type !== "fuel" || e.fuelType !== fuel) continue;
+    if (status !== undefined && e.status !== status) continue;
+    const t = Date.parse(e.lastUpdatedAt);
+    if (!isNaN(t) && (best === null || t > best.at)) best = { at: t, status: e.status };
+  }
+  return best;
+}
+
+// How old is what the map is actually showing? Returns ms epoch, or null.
+// For a specific fuel the age must be stamped on that fuel itself — a payment
+// at the station is not a sighting of АИ-95, so it does not date one. Only two
+// sources can speak: tbank's per-fuel recentEvents and alfa's per-fuel
+// last_transaction_at, and only when their verdict is the one being displayed
+// (a green dot owed to Альфа is as old as Альфа's sighting, whatever Т-Банк's
+// model says). Sber times nothing per fuel, so it can colour a marker but
+// never date one. No stamp and no state are both "unknown" — hence no age,
+// and the freshness filter drops the station.
+function stationSeenAt(s) {
+  let best = null;
+  const keep = t => { if (t != null && !isNaN(t) && (best === null || t > best)) best = t; };
+  const at = iso => keep(iso ? Date.parse(iso) : null);
+  if (fuelFilter === "all") {
+    at(s.lastTransactionAt); at(s.sberPayAt); at(s.alfaPayAt);
+    return best;
+  }
+  const st = stationStatus(s);
+  if (st === "no_data") return null;
+  if ((s.statusByFuelType || {})[fuelFilter] === st) {
+    const ev = tbankFuelEvent(s, fuelFilter, st);
+    if (ev) keep(ev.at);
+  }
+  const af = alfaFuel(s, fuelFilter);
+  if (af && ALFA_TO_STATUS[af.status] === st) at(af.last_transaction_at);
+  return best;
+}
+
+function freshEnough(s) {
+  if (!maxAge) return true;
+  const t = stationSeenAt(s);
+  return t !== null && Date.now() - t <= maxAge * 60e3;
+}
+
 function stationPasses(s) {
   if (fuelFilter !== "all" &&
       (s.statusByFuelType || {})[fuelFilter] === undefined &&
       !sberFuel(s, fuelFilter) && !alfaFuel(s, fuelFilter)) return false;
+  if (!freshEnough(s)) return false;
   return statusFilter.has(stationStatus(s));
 }
 
@@ -477,11 +542,18 @@ function fmtPayTime(iso) {
 }
 
 function popupHtml(s) {
-  const fuels = Object.entries(s.statusByFuelType || {}).map(([f, st]) =>
-    `<div class="pp-fuel"><b>${FUEL_LABEL(f)}</b>` +
-    `<i class="dot" style="background:${STATUS_COLOR[st] || STATUS_COLOR.no_data}"></i>` +
-    `${STATUS_TEXT[st] || st}</div>`
-  ).join("") || "<div class='muted'>нет данных по видам топлива</div>";
+  // the last thing anyone reported about this fuel. When that report
+  // contradicts the status next to it, name the verdict — it is why a green
+  // "есть" can still count as undated for the freshness filter
+  const fuels = Object.entries(s.statusByFuelType || {}).map(([f, st]) => {
+    const ev = tbankFuelEvent(s, f);
+    const said = !ev || ev.status === st ? "" : `: ${STATUS_TEXT[ev.status] || ev.status}`;
+    const seenTxt = !ev ? ""
+      : ` <span class="muted">· 🕑 ${payShortRel(ev.at)}${said}</span>`;
+    return `<div class="pp-fuel"><b>${FUEL_LABEL(f)}</b>` +
+           `<i class="dot" style="background:${STATUS_COLOR[st] || STATUS_COLOR.no_data}"></i>` +
+           `${STATUS_TEXT[st] || st}${seenTxt}</div>`;
+  }).join("") || "<div class='muted'>нет данных по видам топлива</div>";
 
   const conf = s.confidence != null
     ? `<div class="pp-conf">уверенность оценки: ${Math.round(s.confidence * 100)}%</div>` : "";
@@ -604,8 +676,8 @@ function esc(t) {
   return String(t).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-function payShortRel(iso) {
-  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+function payShortRel(when) {   // ISO string or ms epoch
+  const mins = Math.round((Date.now() - new Date(when).getTime()) / 60000);
   if (mins < 1) return "сейчас";
   if (mins < 60) return `${mins} мин`;
   if (mins < 48 * 60) return `${Math.round(mins / 60)} ч`;
@@ -727,6 +799,25 @@ document.getElementById("fuelFilters").addEventListener("click", e => {
   fuelFilter = btn.dataset.fuel;
   document.querySelectorAll("#fuelFilters .chip")
     .forEach(b => b.classList.toggle("active", b === btn));
+  clearRoute();
+  renderMarkers();
+  savePrefs();
+});
+
+// "30 мин" / "1 ч" / "1,5 ч" / "2 ч" …
+function ageLabel(min) {
+  if (!min) return "любая";
+  if (min < 60) return `${min} мин`;
+  return `${String(min / 60).replace(".", ",")} ч`;
+}
+
+const ageRange = document.getElementById("ageRange");
+const showAge = v => { document.getElementById("ageLabel").textContent = ageLabel(v * MAX_AGE_STEP); };
+// the label follows the thumb live, but re-rendering every marker waits for release
+ageRange.addEventListener("input", () => showAge(ageRange.value));
+ageRange.addEventListener("change", () => {
+  maxAge = ageRange.value * MAX_AGE_STEP;
+  showAge(ageRange.value);
   clearRoute();
   renderMarkers();
   savePrefs();
@@ -1006,6 +1097,8 @@ document.querySelectorAll("#statusFilters .chip")
   .forEach(b => b.classList.toggle("active", statusFilter.has(b.dataset.status)));
 document.querySelectorAll("#fuelFilters .chip")
   .forEach(b => b.classList.toggle("active", b.dataset.fuel === fuelFilter));
+ageRange.value = maxAge / MAX_AGE_STEP;
+showAge(ageRange.value);
 
 // keep relative payment times fresh (skip while a popup is open)
 setInterval(() => {
