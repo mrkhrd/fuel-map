@@ -216,18 +216,19 @@ fn tls_connect(host: &str, tcp: TcpStream) -> Result<Box<dyn ReadWrite>, Box<dyn
     Ok(Box::new(native_tls::TlsConnector::new()?.connect(host, tcp)?))
 }
 
-// alfabank.ru's certificate chains to the Russian Trusted Root CA (Ministry of
-// Digital Development), which is not in the Mozilla bundle webpki-roots ships —
-// so on Linux the alfa source failed with UnknownIssuer, and in the scratch
-// container there is no OS trust store to fall back on. The root is public and
-// self-signed (alfabank serves it in its own chain); embedded here as DER.
+// alfabank.ru and toplivo.tbank.ru certificates chain to the Russian Trusted
+// Root CA (Ministry of Digital Development), which is not in the Mozilla bundle
+// webpki-roots ships — so on Linux these sources failed with UnknownIssuer, and
+// in the scratch container there is no OS trust store to fall back on. The root
+// is public and self-signed (both hosts serve it in their own chain); embedded
+// here as DER.
 // SHA-256 D2:6D:2D:02:31:B7:C3:9F:92:CC:73:85:12:BA:54:10:35:19:E4:40:5D:68:B5:BD:70:3E:97:88:CA:8E:CF:31
-// It is added ONLY to the config used for alfabank.ru: the other upstreams keep
-// the stock roots, so this CA cannot vouch for tbank, sber or the router.
+// It is added ONLY to the config used for these hosts: the other upstreams keep
+// the stock roots, so this CA cannot vouch for sber or the router.
 #[cfg(not(windows))]
-const ALFA_ROOT_CA: &[u8] = include_bytes!("russian-trusted-root-ca.der");
+const RU_ROOT_CA: &[u8] = include_bytes!("russian-trusted-root-ca.der");
 #[cfg(not(windows))]
-const ALFA_HOST: &str = "alfabank.ru";
+const RU_ROOT_HOSTS: &[&str] = &["alfabank.ru", "toplivo.tbank.ru"];
 
 #[cfg(not(windows))]
 fn tls_connect(host: &str, tcp: TcpStream) -> Result<Box<dyn ReadWrite>, Box<dyn std::error::Error>> {
@@ -241,7 +242,7 @@ fn tls_connect(host: &str, tcp: TcpStream) -> Result<Box<dyn ReadWrite>, Box<dyn
             // fail loudly at first use instead of retrying forever
             roots
                 .add(rustls::pki_types::CertificateDer::from(der))
-                .expect("embedded alfabank root CA is not valid DER");
+                .expect("embedded Russian root CA is not valid DER");
         }
         Arc::new(
             rustls::ClientConfig::builder()
@@ -250,9 +251,9 @@ fn tls_connect(host: &str, tcp: TcpStream) -> Result<Box<dyn ReadWrite>, Box<dyn
         )
     }
     static CFG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    static ALFA_CFG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    let cfg = if host == ALFA_HOST {
-        ALFA_CFG.get_or_init(|| config(Some(ALFA_ROOT_CA))).clone()
+    static RU_CFG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    let cfg = if RU_ROOT_HOSTS.contains(&host) {
+        RU_CFG.get_or_init(|| config(Some(RU_ROOT_CA))).clone()
     } else {
         CFG.get_or_init(|| config(None)).clone()
     };
